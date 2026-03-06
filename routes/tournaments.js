@@ -4,6 +4,78 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 
+// GET /api/tournaments/list — All tournaments (for pool league setup)
+router.get('/list', auth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('tournaments')
+      .select('id, name, year, status, start_date, end_date, is_active')
+      .order('start_date', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('List tournaments error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/tournaments/:id/field — Players in a specific tournament (from player_scores)
+router.get('/:id/field', auth, async (req, res) => {
+  try {
+    // Get player names from the tournament's player_scores
+    const { data: scores, error: scoresErr } = await supabase
+      .from('player_scores')
+      .select('player_name')
+      .eq('tournament_id', req.params.id);
+
+    if (scoresErr) throw scoresErr;
+
+    const fieldNames = (scores || []).map(s => s.player_name);
+    if (fieldNames.length === 0) {
+      return res.json([]);
+    }
+
+    // Join with player_stats for SG/ranking data
+    const { data: stats, error: statsErr } = await supabase
+      .from('player_stats')
+      .select('*')
+      .in('player_name', fieldNames)
+      .order('dg_rank', { ascending: true, nullsFirst: false });
+
+    if (statsErr) throw statsErr;
+
+    // Include field players who might not be in player_stats
+    const statsMap = new Map((stats || []).map(s => [s.player_name.toLowerCase(), s]));
+    const result = fieldNames.map(name => {
+      const p = statsMap.get(name.toLowerCase());
+      return {
+        playerName: name,
+        owgrRank: p?.owgr_rank || null,
+        dgRank: p?.dg_rank || null,
+        sgTotal: p ? parseFloat(p.sg_total) : null,
+        sgOtt: p ? parseFloat(p.sg_ott) : null,
+        sgApp: p ? parseFloat(p.sg_app) : null,
+        sgArg: p ? parseFloat(p.sg_arg) : null,
+        sgPutt: p ? parseFloat(p.sg_putt) : null,
+        drivingAcc: p ? parseFloat(p.driving_acc) : null,
+        drivingDist: p ? parseFloat(p.driving_dist) : null,
+        winPct: p ? parseFloat(p.win_pct) : null,
+        top5Pct: p ? parseFloat(p.top5_pct) : null,
+        top10Pct: p ? parseFloat(p.top10_pct) : null,
+        top20Pct: p ? parseFloat(p.top20_pct) : null,
+      };
+    });
+
+    // Sort by dg_rank
+    result.sort((a, b) => (a.dgRank || 999) - (b.dgRank || 999));
+    res.json(result);
+  } catch (err) {
+    console.error('Tournament field error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/tournaments/active
 router.get('/active', auth, async (req, res) => {
   try {

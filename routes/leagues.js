@@ -15,7 +15,7 @@ const { DEFAULT_SCORING: DEFAULT_SEASON_SCORING } = require('../services/seasonS
 router.post('/', auth, async (req, res) => {
   const {
     name, teamName, maxTeams = 8, scoringTopN = 4, draftRounds = 4,
-    leagueType = 'pool', scoringConfig, rosterSize, startersCount,
+    leagueType = 'pool', scoringConfig, rosterSize, startersCount, tournamentId,
   } = req.body;
 
   if (!name || !teamName) {
@@ -40,6 +40,7 @@ router.post('/', auth, async (req, res) => {
         scoring_config: isPool ? {} : (scoringConfig || DEFAULT_SEASON_SCORING),
         roster_size: isPool ? draftRounds : (rosterSize || 6),
         starters_count: isPool ? draftRounds : (startersCount || 4),
+        tournament_id: isPool ? (tournamentId || null) : null,
       })
       .select()
       .single();
@@ -68,6 +69,7 @@ router.post('/', auth, async (req, res) => {
       draftRounds: league.draft_rounds,
       rosterSize: league.roster_size,
       startersCount: league.starters_count,
+      tournamentId: league.tournament_id,
       status: league.status,
     });
   } catch (err) {
@@ -163,6 +165,7 @@ router.get('/', auth, async (req, res) => {
         status: league.status,
         leagueType: league.league_type,
         maxTeams: league.max_teams,
+        tournamentId: league.tournament_id,
         memberCount: count,
         myTeamName: m.team_name,
         isOwner: league.owner_id === req.user.id,
@@ -237,6 +240,7 @@ router.get('/:id', auth, async (req, res) => {
       draftRounds: league.draft_rounds,
       rosterSize: league.roster_size,
       startersCount: league.starters_count,
+      tournamentId: league.tournament_id,
       isOwner: league.owner_id === req.user.id,
       members: (members || []).map(m => ({
         id: m.id,

@@ -211,6 +211,8 @@ async function getDraftState(leagueId) {
 
   return {
     status: league.status,
+    leagueType: league.league_type,
+    tournamentId: league.tournament_id,
     draftRounds: league.draft_rounds,
     currentPick,
     totalPicks,
