@@ -91,6 +91,7 @@ async function syncPlayerStats() {
       player_name: r.player_name,
       owgr_rank: r.owgr_rank,
       dg_rank: r.datagolf_rank,
+      primary_tour: r.primary_tour || null,
       sg_total: sk.sg_total ?? null,
       sg_ott: sk.sg_ott ?? null,
       sg_app: sk.sg_app ?? null,

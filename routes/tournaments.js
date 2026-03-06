@@ -62,13 +62,19 @@ router.get('/leaderboard', auth, async (req, res) => {
   }
 });
 
-// GET /api/tournaments/player-stats
+// GET /api/tournaments/player-stats?tour=pga
 router.get('/player-stats', auth, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('player_stats')
       .select('*')
       .order('dg_rank', { ascending: true, nullsFirst: false });
+
+    if (req.query.tour) {
+      query = query.eq('primary_tour', req.query.tour);
+    }
+
+    const { data, error } = await query;
 
     if (error) throw error;
 
