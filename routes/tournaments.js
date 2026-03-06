@@ -94,4 +94,65 @@ router.get('/player-stats', auth, async (req, res) => {
   }
 });
 
+// GET /api/tournaments/hole-scores?player=Name — Get hole-by-hole for a player
+// GET /api/tournaments/hole-scores — Get all hole scores (for league standings expansion)
+router.get('/hole-scores', auth, async (req, res) => {
+  try {
+    const { data: tournament } = await supabase
+      .from('tournaments')
+      .select('id')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (!tournament) {
+      return res.json({ players: [] });
+    }
+
+    let query = supabase
+      .from('hole_scores')
+      .select('player_name, dg_id, round_num, hole, par, score')
+      .eq('tournament_id', tournament.id)
+      .order('round_num')
+      .order('hole');
+
+    if (req.query.player) {
+      query = query.ilike('player_name', `%${req.query.player}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    // Group by player -> rounds -> holes
+    const playerMap = new Map();
+    for (const row of data || []) {
+      if (!playerMap.has(row.player_name)) {
+        playerMap.set(row.player_name, { playerName: row.player_name, dgId: row.dg_id, rounds: {} });
+      }
+      const player = playerMap.get(row.player_name);
+      if (!player.rounds[row.round_num]) {
+        player.rounds[row.round_num] = [];
+      }
+      player.rounds[row.round_num].push({
+        hole: row.hole,
+        par: row.par,
+        score: row.score,
+      });
+    }
+
+    const players = Array.from(playerMap.values()).map(p => ({
+      playerName: p.playerName,
+      dgId: p.dgId,
+      rounds: Object.entries(p.rounds).map(([roundNum, holes]) => ({
+        roundNum: parseInt(roundNum),
+        holes,
+      })),
+    }));
+
+    res.json({ players });
+  } catch (err) {
+    console.error('Hole scores error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

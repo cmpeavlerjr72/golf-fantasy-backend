@@ -146,19 +146,56 @@ async function syncLiveScores(tournamentId) {
   return rows.length;
 }
 
-// Full sync: tournament + stats + live scores
+// Sync hole-by-hole scores from live-hole-scores endpoint
+async function syncHoleScores(tournamentId) {
+  const data = await dgFetch('/preds/live-hole-scores?tour=pga');
+
+  // Clear existing hole scores for this tournament
+  await supabase.from('hole_scores').delete().eq('tournament_id', tournamentId);
+
+  const rows = [];
+  for (const player of data.players || []) {
+    for (const round of player.rounds || []) {
+      for (const hole of round.scores || []) {
+        rows.push({
+          tournament_id: tournamentId,
+          player_name: player.player_name,
+          dg_id: player.dg_id,
+          round_num: round.round_num,
+          hole: hole.hole,
+          par: hole.par,
+          score: hole.score,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  // Insert in batches of 500
+  for (let i = 0; i < rows.length; i += 500) {
+    const batch = rows.slice(i, i + 500);
+    const { error } = await supabase.from('hole_scores').insert(batch);
+    if (error) console.error('Hole scores insert error:', error.message);
+  }
+
+  return rows.length;
+}
+
+// Full sync: tournament + stats + live scores + hole scores
 async function syncAll() {
   const { tournamentId, eventName } = await syncTournament();
   const statsCount = await syncPlayerStats();
   const scoresCount = await syncLiveScores(tournamentId);
+  const holeCount = await syncHoleScores(tournamentId);
 
   return {
     tournament: eventName,
     tournamentId,
     playersWithStats: statsCount,
     playersWithScores: scoresCount,
+    holeScoresSynced: holeCount,
     syncedAt: new Date().toISOString(),
   };
 }
 
-module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores };
+module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores };
