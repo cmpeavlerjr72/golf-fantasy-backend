@@ -1,0 +1,214 @@
+const supabase = require('../config/supabase');
+const jwt = require('jsonwebtoken');
+
+function setupDraftSocket(io) {
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) return next(new Error('Authentication required'));
+
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.user = decoded;
+      next();
+    } catch (err) {
+      next(new Error('Invalid token'));
+    }
+  });
+
+  io.on('connection', (socket) => {
+    console.log(`User ${socket.user.id} connected`);
+
+    socket.on('join-draft', async ({ leagueId }) => {
+      try {
+        const { data: member } = await supabase
+          .from('league_members')
+          .select('*, leagues(*)')
+          .eq('league_id', leagueId)
+          .eq('user_id', socket.user.id)
+          .maybeSingle();
+
+        if (!member) return;
+
+        const room = `draft-${leagueId}`;
+        socket.join(room);
+        socket.leagueId = leagueId;
+        socket.memberId = member.id;
+
+        const state = await getDraftState(leagueId);
+        socket.emit('draft-state', state);
+      } catch (err) {
+        console.error('Join draft error:', err);
+      }
+    });
+
+    socket.on('start-draft', async ({ leagueId }) => {
+      try {
+        const { data: league } = await supabase
+          .from('leagues')
+          .select('*')
+          .eq('id', leagueId)
+          .single();
+
+        if (!league) return;
+        if (league.owner_id !== socket.user.id) return;
+        if (league.status !== 'pre_draft') return;
+
+        // Get members and shuffle for random draft order
+        const { data: members } = await supabase
+          .from('league_members')
+          .select('id')
+          .eq('league_id', leagueId);
+
+        const shuffled = members.sort(() => Math.random() - 0.5);
+        for (let i = 0; i < shuffled.length; i++) {
+          await supabase
+            .from('league_members')
+            .update({ draft_order: i + 1 })
+            .eq('id', shuffled[i].id);
+        }
+
+        await supabase
+          .from('leagues')
+          .update({ status: 'drafting' })
+          .eq('id', leagueId);
+
+        const state = await getDraftState(leagueId);
+        io.to(`draft-${leagueId}`).emit('draft-state', state);
+      } catch (err) {
+        console.error('Start draft error:', err);
+      }
+    });
+
+    socket.on('draft-pick', async ({ leagueId, playerName, playerId }) => {
+      try {
+        const { data: league } = await supabase
+          .from('leagues')
+          .select('*')
+          .eq('id', leagueId)
+          .single();
+
+        if (!league || league.status !== 'drafting') return;
+
+        const { data: members } = await supabase
+          .from('league_members')
+          .select('*')
+          .eq('league_id', leagueId)
+          .order('draft_order');
+
+        const { data: picks } = await supabase
+          .from('draft_picks')
+          .select('*')
+          .eq('league_id', leagueId);
+
+        const currentPick = picks ? picks.length : 0;
+        const totalPicks = members.length * league.draft_rounds;
+
+        if (currentPick >= totalPicks) return;
+
+        // Snake draft logic
+        const round = Math.floor(currentPick / members.length);
+        const posInRound = currentPick % members.length;
+        const isReversed = round % 2 === 1;
+        const teamIndex = isReversed ? members.length - 1 - posInRound : posInRound;
+        const currentMember = members[teamIndex];
+
+        if (currentMember.id !== socket.memberId) return;
+
+        // Check if player already drafted
+        const alreadyPicked = (picks || []).some(
+          p => p.player_name.toLowerCase() === playerName.toLowerCase()
+        );
+        if (alreadyPicked) {
+          socket.emit('draft-error', { message: 'Player already drafted' });
+          return;
+        }
+
+        const { error } = await supabase
+          .from('draft_picks')
+          .insert({
+            league_id: leagueId,
+            member_id: currentMember.id,
+            player_name: playerName,
+            player_id: playerId || null,
+            round: round + 1,
+            pick_number: currentPick + 1,
+          });
+
+        if (error) throw error;
+
+        // Check if draft is complete
+        if (currentPick + 1 >= totalPicks) {
+          await supabase
+            .from('leagues')
+            .update({ status: 'active' })
+            .eq('id', leagueId);
+        }
+
+        const state = await getDraftState(leagueId);
+        io.to(`draft-${leagueId}`).emit('draft-state', state);
+      } catch (err) {
+        console.error('Draft pick error:', err);
+      }
+    });
+
+    socket.on('disconnect', () => {
+      console.log(`User ${socket.user.id} disconnected`);
+    });
+  });
+}
+
+async function getDraftState(leagueId) {
+  const { data: league } = await supabase
+    .from('leagues')
+    .select('*')
+    .eq('id', leagueId)
+    .single();
+
+  const { data: members } = await supabase
+    .from('league_members')
+    .select('id, team_name, draft_order, user_id, users(display_name)')
+    .eq('league_id', leagueId)
+    .order('draft_order');
+
+  const { data: picks } = await supabase
+    .from('draft_picks')
+    .select('*, league_members(team_name)')
+    .eq('league_id', leagueId)
+    .order('pick_number');
+
+  const currentPick = picks ? picks.length : 0;
+  const totalPicks = (members || []).length * league.draft_rounds;
+  let currentMemberId = null;
+
+  if (league.status === 'drafting' && currentPick < totalPicks) {
+    const round = Math.floor(currentPick / members.length);
+    const posInRound = currentPick % members.length;
+    const isReversed = round % 2 === 1;
+    const teamIndex = isReversed ? members.length - 1 - posInRound : posInRound;
+    currentMemberId = members[teamIndex].id;
+  }
+
+  return {
+    status: league.status,
+    draftRounds: league.draft_rounds,
+    currentPick,
+    totalPicks,
+    currentMemberId,
+    members: (members || []).map(m => ({
+      id: m.id,
+      teamName: m.team_name,
+      displayName: m.users?.display_name,
+      userId: m.user_id,
+      draftOrder: m.draft_order,
+    })),
+    picks: (picks || []).map(p => ({
+      memberId: p.member_id,
+      teamName: p.league_members?.team_name,
+      playerName: p.player_name,
+      round: p.round,
+      pickNumber: p.pick_number,
+    })),
+  };
+}
+
+module.exports = setupDraftSocket;
