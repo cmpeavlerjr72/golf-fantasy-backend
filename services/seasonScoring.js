@@ -283,26 +283,12 @@ async function processWeeklyResults(leagueId, tournamentId) {
 async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConfig) {
   const scoring = { ...DEFAULT_SCORING, ...scoringConfig };
 
-  // 1. Fetch ALL hole scores for these players in one query
-  const { data: allHoles } = await supabase
-    .from('hole_scores')
-    .select('player_name, score, par')
-    .eq('tournament_id', tournamentId)
-    .in('player_name', playerNames);
-
-  // 2. Fetch ALL tournament stats for these players in one query
-  const { data: allStats } = await supabase
-    .from('tournament_stats')
-    .select('*')
-    .eq('tournament_id', tournamentId)
-    .in('player_name', playerNames);
-
-  // 3. Fetch field averages once
-  const { data: fieldAvg } = await supabase
-    .from('tournament_field_averages')
-    .select('*')
-    .eq('tournament_id', tournamentId)
-    .maybeSingle();
+  // Fetch ALL data for the tournament in 3 parallel queries, match in memory (case-insensitive)
+  const [{ data: allHoles }, { data: allStats }, { data: fieldAvg }] = await Promise.all([
+    supabase.from('hole_scores').select('player_name, score, par').eq('tournament_id', tournamentId),
+    supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
+    supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
+  ]);
 
   // Build lookup maps
   const holesByPlayer = {};
