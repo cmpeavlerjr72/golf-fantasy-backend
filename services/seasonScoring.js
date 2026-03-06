@@ -10,12 +10,12 @@ const DEFAULT_SCORING = {
   double_bogey: -3,
   worse: -5,
   // Stat multipliers (relative to field average)
-  fir_multiplier: 15,       // (player_fir - field_avg) * multiplier
-  gir_multiplier: 20,       // GIR matters more than FIR
-  distance_multiplier: 0.1, // per yard above/below average
+  fir_multiplier: 15,        // (player_fir - field_avg) * multiplier
+  gir_multiplier: 20,        // GIR matters more than FIR
+  distance_multiplier: 0.15, // per yard above/below average
   // Great/poor shot bonuses
-  great_shot_bonus: 0.5,    // per great shot
-  poor_shot_penalty: -0.5,  // per poor shot
+  great_shot_bonus: 0.75,    // per great shot
+  poor_shot_penalty: -0.75,  // per poor shot
 };
 
 // Generate default season points distribution based on league size
