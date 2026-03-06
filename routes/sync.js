@@ -47,4 +47,69 @@ router.post('/stats', auth, async (req, res) => {
   }
 });
 
+// GET /api/sync/debug — Check what data is in the tables
+router.get('/debug', auth, async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+
+    const { data: tournament } = await supabase
+      .from('tournaments')
+      .select('id, name, is_active')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (!tournament) return res.json({ error: 'No active tournament' });
+
+    const { data: tournStats, count: tsCount } = await supabase
+      .from('tournament_stats')
+      .select('*', { count: 'exact', head: false })
+      .eq('tournament_id', tournament.id)
+      .limit(3);
+
+    const { data: fieldAvg } = await supabase
+      .from('tournament_field_averages')
+      .select('*')
+      .eq('tournament_id', tournament.id)
+      .maybeSingle();
+
+    const { data: holeScores, count: hsCount } = await supabase
+      .from('hole_scores')
+      .select('player_name', { count: 'exact', head: false })
+      .eq('tournament_id', tournament.id)
+      .limit(3);
+
+    const { data: lineups } = await supabase
+      .from('lineups')
+      .select('player_name, slot, member_id')
+      .eq('tournament_id', tournament.id)
+      .eq('slot', 'starter')
+      .limit(10);
+
+    // Check if lineup player names match tournament_stats names
+    const starterNames = (lineups || []).map(l => l.player_name);
+    const nameMatches = [];
+    for (const name of starterNames.slice(0, 5)) {
+      const { data: match } = await supabase
+        .from('tournament_stats')
+        .select('player_name, accuracy, gir, distance')
+        .eq('tournament_id', tournament.id)
+        .ilike('player_name', name)
+        .maybeSingle();
+      nameMatches.push({ lineupName: name, foundInStats: !!match, statsName: match?.player_name || null });
+    }
+
+    res.json({
+      tournament,
+      tournamentStats: { count: tsCount, sample: tournStats },
+      fieldAverages: fieldAvg,
+      holeScores: { count: hsCount, sample: (holeScores || []).map(h => h.player_name) },
+      lineupStarters: starterNames,
+      nameMatches,
+    });
+  } catch (err) {
+    console.error('Debug error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
