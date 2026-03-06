@@ -9,6 +9,7 @@ const leagueRoutes = require('./routes/leagues');
 const tournamentRoutes = require('./routes/tournaments');
 const syncRoutes = require('./routes/sync');
 const setupDraftSocket = require('./services/draftSocket');
+const scheduler = require('./services/scheduler');
 
 const app = express();
 const server = http.createServer(app);
@@ -34,4 +35,5 @@ setupDraftSocket(io);
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  scheduler.start();
 });
