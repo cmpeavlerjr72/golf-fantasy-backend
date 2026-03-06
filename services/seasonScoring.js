@@ -283,9 +283,26 @@ async function processWeeklyResults(leagueId, tournamentId) {
 async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConfig) {
   const scoring = { ...DEFAULT_SCORING, ...scoringConfig };
 
-  // Fetch ALL data for the tournament in 3 parallel queries, match in memory (case-insensitive)
-  const [{ data: allHoles }, { data: allStats }, { data: fieldAvg }] = await Promise.all([
-    supabase.from('hole_scores').select('player_name, score, par').eq('tournament_id', tournamentId),
+  // Fetch ALL data for the tournament in parallel, match in memory (case-insensitive)
+  // hole_scores can exceed Supabase's 1000-row default limit, so paginate
+  async function fetchAllHoles(tid) {
+    let all = [];
+    let from = 0;
+    const PAGE = 1000;
+    while (true) {
+      const { data } = await supabase.from('hole_scores')
+        .select('player_name, score, par')
+        .eq('tournament_id', tid)
+        .range(from, from + PAGE - 1);
+      all = all.concat(data || []);
+      if (!data || data.length < PAGE) break;
+      from += PAGE;
+    }
+    return all;
+  }
+
+  const [allHoles, { data: allStats }, { data: fieldAvg }] = await Promise.all([
+    fetchAllHoles(tournamentId),
     supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
     supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
   ]);
