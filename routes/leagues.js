@@ -219,6 +219,19 @@ router.get('/:id', auth, async (req, res) => {
       .eq('league_id', league.id)
       .order('pick_number');
 
+    // For season leagues, include roster data per member
+    let memberRosters = {};
+    if (league.league_type === 'season') {
+      const { data: allRosters } = await supabase
+        .from('rosters')
+        .select('member_id, player_name')
+        .eq('league_id', league.id);
+      for (const r of allRosters || []) {
+        if (!memberRosters[r.member_id]) memberRosters[r.member_id] = [];
+        memberRosters[r.member_id].push({ playerName: r.player_name });
+      }
+    }
+
     res.json({
       id: league.id,
       name: league.name,
@@ -237,6 +250,8 @@ router.get('/:id', auth, async (req, res) => {
         teamName: m.team_name,
         displayName: m.users?.display_name,
         draftOrder: m.draft_order,
+        isMe: m.user_id === req.user.id,
+        roster: memberRosters[m.id] || [],
       })),
       picks: (picks || []).map(p => ({
         id: p.id,
