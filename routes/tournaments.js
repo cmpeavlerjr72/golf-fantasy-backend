@@ -70,11 +70,22 @@ router.get('/player-stats', auth, async (req, res) => {
       .select('*')
       .order('dg_rank', { ascending: true, nullsFirst: false });
 
-    if (req.query.tour) {
-      query = query.eq('primary_tour', req.query.tour);
+    const wantTour = req.query.tour;
+    if (wantTour) {
+      query = query.eq('primary_tour', wantTour);
     }
 
-    const { data, error } = await query;
+    let { data, error } = await query;
+
+    // Fallback: if tour filter returned nothing (column not populated yet), return all
+    if (wantTour && (!data || data.length === 0) && !error) {
+      const fallback = await supabase
+        .from('player_stats')
+        .select('*')
+        .order('dg_rank', { ascending: true, nullsFirst: false });
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error) throw error;
 
