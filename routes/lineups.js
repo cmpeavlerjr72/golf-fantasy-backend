@@ -25,7 +25,7 @@ router.get('/:leagueId', auth, async (req, res) => {
       .maybeSingle();
 
     if (!tournament) {
-      return res.json({ tournament: null, lineup: [] });
+      return res.json({ tournament: null, lineup: [], roster: [] });
     }
 
     const { data: lineup } = await supabase
@@ -35,6 +35,13 @@ router.get('/:leagueId', auth, async (req, res) => {
       .eq('member_id', member.id)
       .eq('tournament_id', tournament.id);
 
+    // Also return the member's roster so frontend knows all available players
+    const { data: rosterData } = await supabase
+      .from('rosters')
+      .select('player_name')
+      .eq('league_id', req.params.leagueId)
+      .eq('member_id', member.id);
+
     res.json({
       tournament,
       lineup: (lineup || []).map(l => ({
@@ -42,6 +49,7 @@ router.get('/:leagueId', auth, async (req, res) => {
         slot: l.slot,
         locked: l.locked,
       })),
+      roster: (rosterData || []).map(r => r.player_name),
     });
   } catch (err) {
     console.error('Get lineup error:', err);
@@ -85,14 +93,14 @@ router.put('/:leagueId', auth, async (req, res) => {
       return res.status(400).json({ error: 'No active tournament' });
     }
 
-    // Validate roster: starters + bench must be from drafted players
-    const { data: picks } = await supabase
-      .from('draft_picks')
+    // Validate: starters + bench must be on this member's roster
+    const { data: rosterData } = await supabase
+      .from('rosters')
       .select('player_name')
       .eq('league_id', league.id)
       .eq('member_id', member.id);
 
-    const roster = new Set((picks || []).map(p => p.player_name.toLowerCase()));
+    const roster = new Set((rosterData || []).map(p => p.player_name.toLowerCase()));
     const allPlayers = [...(starters || []), ...(bench || [])];
 
     for (const name of allPlayers) {
@@ -114,17 +122,7 @@ router.put('/:leagueId', auth, async (req, res) => {
       .eq('tournament_id', tournament.id)
       .eq('locked', true);
 
-    if (existingLocked && existingLocked.length > 0) {
-      const lockedNames = new Set(existingLocked.map(l => l.player_name.toLowerCase()));
-      // Locked players can't change slots
-      for (const name of allPlayers) {
-        if (lockedNames.has(name.toLowerCase())) {
-          // That's fine, they just can't be moved
-        }
-      }
-    }
-
-    // Clear and re-insert lineup
+    // Clear and re-insert lineup (only unlocked ones)
     await supabase
       .from('lineups')
       .delete()
