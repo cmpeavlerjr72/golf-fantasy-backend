@@ -9,6 +9,8 @@ const leagueRoutes = require('./routes/leagues');
 const tournamentRoutes = require('./routes/tournaments');
 const syncRoutes = require('./routes/sync');
 const lineupRoutes = require('./routes/lineups');
+const rosterRoutes = require('./routes/rosters');
+const tradeRoutes = require('./routes/trades');
 const setupDraftSocket = require('./services/draftSocket');
 const scheduler = require('./services/scheduler');
 
@@ -30,6 +32,8 @@ app.use('/api/leagues', leagueRoutes);
 app.use('/api/tournaments', tournamentRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/lineups', lineupRoutes);
+app.use('/api/rosters', rosterRoutes);
+app.use('/api/trades', tradeRoutes);
 
 // WebSocket for draft
 setupDraftSocket(io);

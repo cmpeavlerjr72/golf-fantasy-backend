@@ -181,12 +181,48 @@ async function syncHoleScores(tournamentId) {
   return rows.length;
 }
 
-// Full sync: tournament + stats + live scores + hole scores
+// Sync tee times from field-updates data into tee_times table
+async function syncTeeTimes(tournamentId, fieldData) {
+  // If no field data passed, fetch it
+  if (!fieldData) {
+    const field = await dgFetch('/field-updates?tour=pga');
+    fieldData = field.field;
+  }
+
+  // Clear existing tee times for this tournament
+  await supabase.from('tee_times').delete().eq('tournament_id', tournamentId);
+
+  const rows = [];
+  for (const player of fieldData || []) {
+    for (const tt of player.teetimes || []) {
+      if (!tt.teetime) continue;
+      rows.push({
+        tournament_id: tournamentId,
+        player_name: player.player_name,
+        dg_id: player.dg_id,
+        round_num: tt.round_num,
+        tee_time: tt.teetime,
+      });
+    }
+  }
+
+  // Insert in batches of 500
+  for (let i = 0; i < rows.length; i += 500) {
+    const batch = rows.slice(i, i + 500);
+    const { error } = await supabase.from('tee_times').insert(batch);
+    if (error) console.error('Tee times insert error:', error.message);
+  }
+
+  return rows.length;
+}
+
+// Full sync: tournament + stats + live scores + hole scores + tee times
 async function syncAll() {
-  const { tournamentId, eventName } = await syncTournament();
+  const { tournamentId, eventName, field } = await syncTournament();
   const statsCount = await syncPlayerStats();
   const scoresCount = await syncLiveScores(tournamentId);
   const holeCount = await syncHoleScores(tournamentId);
+  const teeTimeCount = await syncTeeTimes(tournamentId, field);
 
   return {
     tournament: eventName,
@@ -194,8 +230,9 @@ async function syncAll() {
     playersWithStats: statsCount,
     playersWithScores: scoresCount,
     holeScoresSynced: holeCount,
+    teeTimesSynced: teeTimeCount,
     syncedAt: new Date().toISOString(),
   };
 }
 
-module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores };
+module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes };

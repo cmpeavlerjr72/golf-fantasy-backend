@@ -142,6 +142,27 @@ function setupDraftSocket(io) {
             .from('leagues')
             .update({ status: 'active' })
             .eq('id', leagueId);
+
+          // For season leagues, populate rosters from draft picks
+          if (league.league_type === 'season') {
+            const { data: allPicks } = await supabase
+              .from('draft_picks')
+              .select('member_id, player_name, player_id')
+              .eq('league_id', leagueId);
+
+            const rosterRows = (allPicks || []).map(p => ({
+              league_id: leagueId,
+              member_id: p.member_id,
+              player_name: p.player_name,
+              dg_id: p.player_id || null,
+              acquired_via: 'draft',
+            }));
+
+            if (rosterRows.length > 0) {
+              const { error: rosterErr } = await supabase.from('rosters').insert(rosterRows);
+              if (rosterErr) console.error('Roster populate error:', rosterErr.message);
+            }
+          }
         }
 
         const state = await getDraftState(leagueId);

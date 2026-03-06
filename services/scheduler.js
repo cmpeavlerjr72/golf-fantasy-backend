@@ -1,4 +1,4 @@
-const { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores } = require('./datagolf');
+const { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes } = require('./datagolf');
 
 const FIVE_MINUTES = 5 * 60 * 1000;
 const ONE_HOUR = 60 * 60 * 1000;
@@ -26,10 +26,11 @@ async function tick() {
       ]);
       console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores`);
     } else {
-      // Off day: sync field/tournament info only (tee times, pairings)
-      console.log(`[Scheduler] ${label} — syncing tournament field...`);
-      await syncTournament();
-      console.log(`[Scheduler] Tournament info updated`);
+      // Off day: sync field/tournament info + tee times
+      console.log(`[Scheduler] ${label} — syncing tournament field + tee times...`);
+      const { tournamentId, field } = await syncTournament();
+      const teeCount = await syncTeeTimes(tournamentId, field);
+      console.log(`[Scheduler] Tournament info updated, ${teeCount} tee times synced`);
     }
   } catch (err) {
     console.error(`[Scheduler] Sync failed:`, err.message);
