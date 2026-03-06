@@ -165,6 +165,99 @@ router.put('/:leagueId', auth, async (req, res) => {
   }
 });
 
+// GET /api/lineups/:leagueId/weekly-scores — Live weekly fantasy scores for all teams
+router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
+  try {
+    const { calculatePlayerPoints } = require('../services/seasonScoring');
+
+    const { data: league } = await supabase
+      .from('leagues')
+      .select('*')
+      .eq('id', req.params.leagueId)
+      .maybeSingle();
+
+    if (!league || league.league_type !== 'season') {
+      return res.status(400).json({ error: 'Season league only' });
+    }
+
+    const { data: tournament } = await supabase
+      .from('tournaments')
+      .select('id, name')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (!tournament) {
+      return res.json({ tournament: null, teams: [] });
+    }
+
+    const { data: members } = await supabase
+      .from('league_members')
+      .select('id, team_name, user_id, users(display_name)')
+      .eq('league_id', league.id);
+
+    const { data: allLineups } = await supabase
+      .from('lineups')
+      .select('member_id, player_name, slot')
+      .eq('league_id', league.id)
+      .eq('tournament_id', tournament.id);
+
+    const scoringConfig = league.scoring_config || {};
+    const teams = [];
+
+    for (const member of members || []) {
+      const memberLineup = (allLineups || []).filter(l => l.member_id === member.id);
+      const starters = memberLineup.filter(l => l.slot === 'starter');
+      const benchPlayers = memberLineup.filter(l => l.slot === 'bench');
+
+      let teamPoints = 0;
+      let teamHolePoints = 0;
+      let teamStatPoints = 0;
+      const players = [];
+
+      for (const starter of starters) {
+        const calc = await calculatePlayerPoints(tournament.id, starter.player_name, scoringConfig);
+        teamPoints += calc.points;
+        teamHolePoints += calc.hole_points;
+        teamStatPoints += calc.stat_points;
+        players.push({
+          playerName: starter.player_name,
+          slot: 'starter',
+          ...calc,
+        });
+      }
+
+      for (const bp of benchPlayers) {
+        players.push({
+          playerName: bp.player_name,
+          slot: 'bench',
+          points: 0,
+          hole_points: 0,
+          stat_points: 0,
+          holes_played: 0,
+        });
+      }
+
+      teams.push({
+        memberId: member.id,
+        teamName: member.team_name,
+        displayName: member.users?.display_name,
+        isMe: member.user_id === req.user.id,
+        totalPoints: +teamPoints.toFixed(2),
+        holePoints: +teamHolePoints.toFixed(2),
+        statPoints: +teamStatPoints.toFixed(2),
+        players,
+      });
+    }
+
+    teams.sort((a, b) => b.totalPoints - a.totalPoints);
+
+    res.json({ tournament, teams });
+  } catch (err) {
+    console.error('Weekly scores error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/lineups/:leagueId/season-standings — Season-long points standings
 router.get('/:leagueId/season-standings', auth, async (req, res) => {
   try {
