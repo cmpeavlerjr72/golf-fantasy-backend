@@ -41,7 +41,7 @@ router.post('/', auth, async (req, res) => {
         invite_code: inviteCode,
         owner_id: req.user.id,
         max_teams: maxTeams,
-        scoring_top_n: isPool ? scoringTopN : null,
+        scoring_top_n: isPool ? scoringTopN : 0,
         draft_rounds: draftRounds,
         league_type: leagueType,
         scoring_config: isPool ? {} : (scoringConfig || DEFAULT_SEASON_SCORING),
