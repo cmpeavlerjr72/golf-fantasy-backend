@@ -1,4 +1,4 @@
-const { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes } = require('./datagolf');
+const { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes, syncTournamentStats } = require('./datagolf');
 
 const FIVE_MINUTES = 5 * 60 * 1000;
 const ONE_HOUR = 60 * 60 * 1000;
@@ -17,14 +17,15 @@ async function tick() {
 
   try {
     if (tournamentDay) {
-      // Tournament day: sync live scores + tournament info every 5 min
-      console.log(`[Scheduler] ${label} — syncing live scores + hole scores...`);
+      // Tournament day: sync live scores + hole scores + tournament stats every 5 min
+      console.log(`[Scheduler] ${label} — syncing live scores + hole scores + stats...`);
       const { tournamentId } = await syncTournament();
-      const [scoreCount, holeCount] = await Promise.all([
+      const [scoreCount, holeCount, statCount] = await Promise.all([
         syncLiveScores(tournamentId),
         syncHoleScores(tournamentId),
+        syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
       ]);
-      console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores`);
+      console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
     } else {
       // Off day: sync field/tournament info + tee times
       console.log(`[Scheduler] ${label} — syncing tournament field + tee times...`);

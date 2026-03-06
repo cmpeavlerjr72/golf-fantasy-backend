@@ -181,6 +181,75 @@ async function syncHoleScores(tournamentId) {
   return rows.length;
 }
 
+// Sync live tournament stats (FIR, GIR, distance, great/poor shots, etc.)
+async function syncTournamentStats(tournamentId) {
+  const stats = await dgFetch(
+    '/preds/live-tournament-stats?stats=accuracy,gir,distance,great_shots,poor_shots,sg_putt,sg_arg,sg_app,sg_ott,sg_total&round=event_avg'
+  );
+
+  // Clear existing stats for this tournament
+  await supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId);
+
+  const rows = [];
+  let totalAcc = 0, totalGir = 0, totalDist = 0, totalGreat = 0, totalPoor = 0;
+  let countAcc = 0, countGir = 0, countDist = 0, countAll = 0;
+
+  for (const p of stats.data || stats || []) {
+    const row = {
+      tournament_id: tournamentId,
+      player_name: p.player_name,
+      dg_id: p.dg_id,
+      accuracy: p.accuracy ?? null,
+      gir: p.gir ?? null,
+      distance: p.distance ?? null,
+      great_shots: p.great_shots ?? null,
+      poor_shots: p.poor_shots ?? null,
+      sg_putt: p.sg_putt ?? null,
+      sg_arg: p.sg_arg ?? null,
+      sg_app: p.sg_app ?? null,
+      sg_ott: p.sg_ott ?? null,
+      sg_total: p.sg_total ?? null,
+      thru: p.thru != null ? String(p.thru) : null,
+      position: p.position ?? null,
+      total_score: p.total ?? null,
+      updated_at: new Date().toISOString(),
+    };
+    rows.push(row);
+    countAll++;
+
+    if (p.accuracy != null) { totalAcc += p.accuracy; countAcc++; }
+    if (p.gir != null) { totalGir += p.gir; countGir++; }
+    if (p.distance != null) { totalDist += p.distance; countDist++; }
+    if (p.great_shots != null) totalGreat += p.great_shots;
+    if (p.poor_shots != null) totalPoor += p.poor_shots;
+  }
+
+  // Insert player stats in batches
+  for (let i = 0; i < rows.length; i += 500) {
+    const batch = rows.slice(i, i + 500);
+    const { error } = await supabase.from('tournament_stats').insert(batch);
+    if (error) console.error('Tournament stats insert error:', error.message);
+  }
+
+  // Calculate and store field averages
+  const avgRow = {
+    tournament_id: tournamentId,
+    avg_accuracy: countAcc > 0 ? totalAcc / countAcc : null,
+    avg_gir: countGir > 0 ? totalGir / countGir : null,
+    avg_distance: countDist > 0 ? totalDist / countDist : null,
+    avg_great_shots: countAll > 0 ? totalGreat / countAll : null,
+    avg_poor_shots: countAll > 0 ? totalPoor / countAll : null,
+    player_count: countAll,
+    updated_at: new Date().toISOString(),
+  };
+
+  await supabase
+    .from('tournament_field_averages')
+    .upsert(avgRow, { onConflict: 'tournament_id' });
+
+  return rows.length;
+}
+
 // Sync tee times from field-updates data into tee_times table
 async function syncTeeTimes(tournamentId, fieldData) {
   // If no field data passed, fetch it
@@ -216,13 +285,17 @@ async function syncTeeTimes(tournamentId, fieldData) {
   return rows.length;
 }
 
-// Full sync: tournament + stats + live scores + hole scores + tee times
+// Full sync: tournament + stats + live scores + hole scores + tee times + tournament stats
 async function syncAll() {
   const { tournamentId, eventName, field } = await syncTournament();
   const statsCount = await syncPlayerStats();
   const scoresCount = await syncLiveScores(tournamentId);
   const holeCount = await syncHoleScores(tournamentId);
   const teeTimeCount = await syncTeeTimes(tournamentId, field);
+  const tournStatCount = await syncTournamentStats(tournamentId).catch(err => {
+    console.error('Tournament stats sync error (may not be live yet):', err.message);
+    return 0;
+  });
 
   return {
     tournament: eventName,
@@ -231,8 +304,9 @@ async function syncAll() {
     playersWithScores: scoresCount,
     holeScoresSynced: holeCount,
     teeTimesSynced: teeTimeCount,
+    tournamentStatsSynced: tournStatCount,
     syncedAt: new Date().toISOString(),
   };
 }
 
-module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes };
+module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes, syncTournamentStats };

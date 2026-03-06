@@ -9,14 +9,7 @@ function generateInviteCode() {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
 }
 
-const DEFAULT_SEASON_SCORING = {
-  eagle: 4,
-  birdie: 3,
-  par: 1,
-  bogey: -1,
-  double_bogey: -2,
-  worse: -3,
-};
+const { DEFAULT_SCORING: DEFAULT_SEASON_SCORING } = require('../services/seasonScoring');
 
 // POST /api/leagues — Create a new league
 router.post('/', auth, async (req, res) => {
