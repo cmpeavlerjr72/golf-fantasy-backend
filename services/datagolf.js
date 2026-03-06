@@ -188,44 +188,11 @@ async function syncTournamentStats(tournamentId) {
     '/preds/live-tournament-stats?stats=accuracy,gir,distance,great_shots,poor_shots,sg_putt,sg_arg,sg_app,sg_ott,sg_total&round=event_avg'
   );
 
-  // Log the response shape to debug
-  const topKeys = Object.keys(stats || {});
-  console.log('Tournament stats response keys:', topKeys);
-  if (topKeys.length > 0) {
-    const firstVal = stats[topKeys[0]];
-    console.log('First key type:', typeof firstVal, Array.isArray(firstVal) ? `(array, len=${firstVal.length})` : '');
-  }
-
-  // The DG live-tournament-stats response has structure:
-  // { live_stats: [ { player_name, dg_id, ... stat values ... }, ... ] }
-  // OR possibly: { data: [...] } or just an array
-  let players;
-  if (Array.isArray(stats)) {
-    players = stats;
-  } else if (stats.live_stats && Array.isArray(stats.live_stats)) {
-    players = stats.live_stats;
-  } else if (stats.data && Array.isArray(stats.data)) {
-    players = stats.data;
-  } else {
-    // Try to find any array in the response
-    for (const key of topKeys) {
-      if (Array.isArray(stats[key])) {
-        console.log(`Found player array under key: "${key}" (${stats[key].length} items)`);
-        players = stats[key];
-        break;
-      }
-    }
-  }
-
-  if (!players || !Array.isArray(players)) {
-    console.error('Could not find player array in tournament stats response. Keys:', topKeys);
-    console.error('Response preview:', JSON.stringify(stats).slice(0, 500));
+  // DG returns { live_stats: [ ... ] }
+  const players = stats.live_stats;
+  if (!players || !Array.isArray(players) || players.length === 0) {
+    console.error('No live_stats in tournament stats response. Keys:', Object.keys(stats || {}));
     return 0;
-  }
-
-  console.log(`Processing ${players.length} players from tournament stats`);
-  if (players.length > 0) {
-    console.log('Sample player keys:', Object.keys(players[0]));
   }
 
   // Clear existing stats for this tournament
