@@ -265,6 +265,37 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
+// DELETE /api/leagues/:id — Delete a league (owner only)
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const { data: league } = await supabase
+      .from('leagues')
+      .select('id, owner_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+
+    if (!league) {
+      return res.status(404).json({ error: 'League not found' });
+    }
+
+    if (league.owner_id !== req.user.id) {
+      return res.status(403).json({ error: 'Only the league commissioner can delete this league' });
+    }
+
+    const { error } = await supabase
+      .from('leagues')
+      .delete()
+      .eq('id', league.id);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete league error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/leagues/:id/standings — Get league standings with scores
 router.get('/:id/standings', auth, async (req, res) => {
   try {
