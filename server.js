@@ -7,6 +7,7 @@ const { Server } = require('socket.io');
 const authRoutes = require('./routes/auth');
 const leagueRoutes = require('./routes/leagues');
 const tournamentRoutes = require('./routes/tournaments');
+const syncRoutes = require('./routes/sync');
 const setupDraftSocket = require('./services/draftSocket');
 
 const app = express();
@@ -25,6 +26,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/leagues', leagueRoutes);
 app.use('/api/tournaments', tournamentRoutes);
+app.use('/api/sync', syncRoutes);
 
 // WebSocket for draft
 setupDraftSocket(io);
