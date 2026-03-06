@@ -9,13 +9,27 @@ function generateInviteCode() {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
 }
 
+const DEFAULT_SEASON_SCORING = {
+  eagle: 4,
+  birdie: 3,
+  par: 1,
+  bogey: -1,
+  double_bogey: -2,
+  worse: -3,
+};
+
 // POST /api/leagues — Create a new league
 router.post('/', auth, async (req, res) => {
-  const { name, teamName, maxTeams = 8, scoringTopN = 4, draftRounds = 4 } = req.body;
+  const {
+    name, teamName, maxTeams = 8, scoringTopN = 4, draftRounds = 4,
+    leagueType = 'pool', scoringConfig, rosterSize, startersCount,
+  } = req.body;
 
   if (!name || !teamName) {
     return res.status(400).json({ error: 'League name and your team name are required' });
   }
+
+  const isPool = leagueType === 'pool';
 
   try {
     const inviteCode = generateInviteCode();
@@ -27,8 +41,12 @@ router.post('/', auth, async (req, res) => {
         invite_code: inviteCode,
         owner_id: req.user.id,
         max_teams: maxTeams,
-        scoring_top_n: scoringTopN,
+        scoring_top_n: isPool ? scoringTopN : null,
         draft_rounds: draftRounds,
+        league_type: leagueType,
+        scoring_config: isPool ? {} : (scoringConfig || DEFAULT_SEASON_SCORING),
+        roster_size: isPool ? draftRounds : (rosterSize || 6),
+        starters_count: isPool ? draftRounds : (startersCount || 4),
       })
       .select()
       .single();
@@ -51,8 +69,12 @@ router.post('/', auth, async (req, res) => {
       name: league.name,
       inviteCode: league.invite_code,
       maxTeams: league.max_teams,
+      leagueType: league.league_type,
       scoringTopN: league.scoring_top_n,
+      scoringConfig: league.scoring_config,
       draftRounds: league.draft_rounds,
+      rosterSize: league.roster_size,
+      startersCount: league.starters_count,
       status: league.status,
     });
   } catch (err) {
@@ -146,6 +168,7 @@ router.get('/', auth, async (req, res) => {
         name: league.name,
         inviteCode: league.invite_code,
         status: league.status,
+        leagueType: league.league_type,
         maxTeams: league.max_teams,
         memberCount: count,
         myTeamName: m.team_name,
@@ -201,9 +224,13 @@ router.get('/:id', auth, async (req, res) => {
       name: league.name,
       inviteCode: league.invite_code,
       status: league.status,
+      leagueType: league.league_type,
       maxTeams: league.max_teams,
       scoringTopN: league.scoring_top_n,
+      scoringConfig: league.scoring_config,
       draftRounds: league.draft_rounds,
+      rosterSize: league.roster_size,
+      startersCount: league.starters_count,
       isOwner: league.owner_id === req.user.id,
       members: (members || []).map(m => ({
         id: m.id,
