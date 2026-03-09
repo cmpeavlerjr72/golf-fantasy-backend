@@ -325,6 +325,8 @@ router.post('/:leagueId/finalize/:tournamentId', auth, async (req, res) => {
 // GET /api/lineups/:leagueId/weekly-history — Get all finalized weekly results
 router.get('/:leagueId/weekly-history', auth, async (req, res) => {
   try {
+    const { DEFAULT_SCORING } = require('../services/seasonScoring');
+
     const { data: league } = await supabase
       .from('leagues')
       .select('*')
@@ -334,6 +336,8 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
     if (!league || league.league_type !== 'season') {
       return res.status(400).json({ error: 'Season league only' });
     }
+
+    const scoring = { ...DEFAULT_SCORING, ...(league.scoring_config || {}) };
 
     const { data: weeklyResults } = await supabase
       .from('weekly_results')
@@ -358,14 +362,92 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
       tournamentMap[t.id] = t.name;
     }
 
-    // Get per-player season_scores for these tournaments
-    const { data: seasonScores } = tournamentIds.length > 0
-      ? await supabase
-          .from('season_scores')
-          .select('*')
-          .eq('league_id', league.id)
-          .in('tournament_id', tournamentIds)
-      : { data: [] };
+    // Get the players each member had set for each tournament (from lineups)
+    let allLineups = [];
+    if (tournamentIds.length > 0) {
+      const { data } = await supabase
+        .from('lineups')
+        .select('member_id, tournament_id, player_name, slot')
+        .eq('league_id', league.id)
+        .in('tournament_id', tournamentIds)
+        .eq('slot', 'starter');
+      allLineups = data || [];
+    }
+
+    // Get raw player results from the master table
+    let allPlayerResults = [];
+    if (tournamentIds.length > 0) {
+      const { data } = await supabase
+        .from('player_tournament_results')
+        .select('*')
+        .in('tournament_id', tournamentIds);
+      allPlayerResults = data || [];
+    }
+
+    // Index player results by tournament+player_name
+    const resultsByKey = {};
+    for (const r of allPlayerResults) {
+      resultsByKey[`${r.tournament_id}:${r.player_name.toLowerCase()}`] = r;
+    }
+
+    // Apply league scoring to raw stats
+    function calcPlayerPoints(raw) {
+      // Hole points
+      const holePoints =
+        (raw.eagles || 0) * scoring.eagle +
+        (raw.birdies || 0) * scoring.birdie +
+        (raw.pars || 0) * scoring.par +
+        (raw.bogeys || 0) * scoring.bogey +
+        (raw.doubles_or_worse || 0) * scoring.double_bogey;
+
+      // Stat bonus points
+      let statPoints = 0;
+      const statBreakdown = {};
+
+      if (raw.accuracy != null && raw.field_avg_accuracy != null) {
+        const firDiff = raw.accuracy - raw.field_avg_accuracy;
+        const firPts = +(firDiff * (scoring.fir_multiplier || 0)).toFixed(2);
+        statPoints += firPts;
+        statBreakdown.fir = { value: raw.accuracy, avg: raw.field_avg_accuracy, pts: firPts };
+      }
+      if (raw.gir != null && raw.field_avg_gir != null) {
+        const girDiff = raw.gir - raw.field_avg_gir;
+        const girPts = +(girDiff * (scoring.gir_multiplier || 0)).toFixed(2);
+        statPoints += girPts;
+        statBreakdown.gir = { value: raw.gir, avg: raw.field_avg_gir, pts: girPts };
+      }
+      if (raw.distance != null && raw.field_avg_distance != null) {
+        const distDiff = raw.distance - raw.field_avg_distance;
+        const distPts = +(distDiff * (scoring.distance_multiplier || 0)).toFixed(2);
+        statPoints += distPts;
+        statBreakdown.distance = { value: raw.distance, avg: raw.field_avg_distance, pts: distPts };
+      }
+      if (raw.great_shots != null) {
+        const greatPts = +(raw.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
+        statPoints += greatPts;
+        statBreakdown.great_shots = { count: raw.great_shots, pts: greatPts };
+      }
+      if (raw.poor_shots != null) {
+        const poorPts = +(raw.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
+        statPoints += poorPts;
+        statBreakdown.poor_shots = { count: raw.poor_shots, pts: poorPts };
+      }
+
+      statPoints = +statPoints.toFixed(2);
+
+      return {
+        points: +(holePoints + statPoints).toFixed(2),
+        hole_points: +holePoints.toFixed(2),
+        stat_points: statPoints,
+        stat_breakdown: statBreakdown,
+        eagles: raw.eagles || 0,
+        birdies: raw.birdies || 0,
+        pars: raw.pars || 0,
+        bogeys: raw.bogeys || 0,
+        doubles_or_worse: raw.doubles_or_worse || 0,
+        holes_played: raw.holes_played || 0,
+      };
+    }
 
     // Group by tournament
     const weeks = {};
@@ -378,20 +460,19 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
         };
       }
 
-      // Get this member's player scores for this tournament
-      const playerScores = (seasonScores || [])
-        .filter(s => s.member_id === r.member_id && s.tournament_id === r.tournament_id)
-        .map(s => ({
-          playerName: s.player_name,
-          points: parseFloat(s.points),
-          eagles: s.eagles,
-          birdies: s.birdies,
-          pars: s.pars,
-          bogeys: s.bogeys,
-          doubles_or_worse: s.doubles_or_worse,
-          holes_played: s.holes_played,
-        }))
-        .sort((a, b) => b.points - a.points);
+      // Get this member's starters for this tournament
+      const memberStarters = allLineups.filter(
+        l => l.member_id === r.member_id && l.tournament_id === r.tournament_id
+      );
+
+      // Calculate points for each player using raw data + league scoring
+      const players = memberStarters.map(starter => {
+        const raw = resultsByKey[`${r.tournament_id}:${starter.player_name.toLowerCase()}`];
+        if (!raw) {
+          return { playerName: starter.player_name, points: 0, hole_points: 0, stat_points: 0, stat_breakdown: {}, eagles: 0, birdies: 0, pars: 0, bogeys: 0, doubles_or_worse: 0, holes_played: 0 };
+        }
+        return { playerName: starter.player_name, ...calcPlayerPoints(raw) };
+      }).sort((a, b) => b.points - a.points);
 
       weeks[r.tournament_id].results.push({
         memberId: r.member_id,
@@ -400,7 +481,7 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
         weeklyPoints: parseFloat(r.weekly_points),
         position: r.position,
         seasonPoints: parseFloat(r.season_points),
-        players: playerScores,
+        players,
       });
     }
 

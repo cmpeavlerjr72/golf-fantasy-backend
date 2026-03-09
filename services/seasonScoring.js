@@ -205,6 +205,9 @@ async function calculateWeeklyPoints(leagueId, memberId, tournamentId, scoringCo
 
 // Process end-of-week: calculate all weekly points, assign positions, award season points
 async function processWeeklyResults(leagueId, tournamentId) {
+  // Snapshot raw player results (league-agnostic, idempotent)
+  await snapshotTournamentResults(tournamentId);
+
   const { data: league } = await supabase
     .from('leagues')
     .select('*')
@@ -382,6 +385,91 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
   return results;
 }
 
+// Snapshot all player results for a tournament into the master player_tournament_results table
+// This is league-agnostic — stores raw hole counts + raw stat values + field averages
+async function snapshotTournamentResults(tournamentId) {
+  // Fetch all hole scores (paginated)
+  let allHoles = [];
+  let from = 0;
+  const PAGE = 1000;
+  while (true) {
+    const { data } = await supabase.from('hole_scores')
+      .select('player_name, score, par')
+      .eq('tournament_id', tournamentId)
+      .range(from, from + PAGE - 1);
+    allHoles = allHoles.concat(data || []);
+    if (!data || data.length < PAGE) break;
+    from += PAGE;
+  }
+
+  // Fetch stats and field averages
+  const [{ data: allStats }, { data: fieldAvg }] = await Promise.all([
+    supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
+    supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
+  ]);
+
+  // Build hole counts per player
+  const playerHoles = {};
+  for (const h of allHoles) {
+    const key = h.player_name;
+    if (!playerHoles[key]) playerHoles[key] = { eagles: 0, birdies: 0, pars: 0, bogeys: 0, doubles_or_worse: 0, holes_played: 0 };
+    if (h.score === null) continue;
+    playerHoles[key].holes_played++;
+    const diff = h.score - h.par;
+    if (diff <= -2) playerHoles[key].eagles++;
+    else if (diff === -1) playerHoles[key].birdies++;
+    else if (diff === 0) playerHoles[key].pars++;
+    else if (diff === 1) playerHoles[key].bogeys++;
+    else playerHoles[key].doubles_or_worse++;
+  }
+
+  // Build stats lookup
+  const statsMap = {};
+  for (const s of allStats || []) {
+    statsMap[s.player_name] = s;
+  }
+
+  // Get all unique player names from holes and stats
+  const allPlayers = new Set([...Object.keys(playerHoles), ...Object.keys(statsMap)]);
+
+  const rows = [];
+  for (const name of allPlayers) {
+    const holes = playerHoles[name] || { eagles: 0, birdies: 0, pars: 0, bogeys: 0, doubles_or_worse: 0, holes_played: 0 };
+    const stats = statsMap[name] || {};
+
+    rows.push({
+      tournament_id: tournamentId,
+      player_name: name,
+      eagles: holes.eagles,
+      birdies: holes.birdies,
+      pars: holes.pars,
+      bogeys: holes.bogeys,
+      doubles_or_worse: holes.doubles_or_worse,
+      holes_played: holes.holes_played,
+      accuracy: stats.accuracy || null,
+      gir: stats.gir || null,
+      distance: stats.distance || null,
+      great_shots: stats.great_shots || null,
+      poor_shots: stats.poor_shots || null,
+      field_avg_accuracy: fieldAvg?.avg_accuracy || null,
+      field_avg_gir: fieldAvg?.avg_gir || null,
+      field_avg_distance: fieldAvg?.avg_distance || null,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  // Upsert in batches
+  for (let i = 0; i < rows.length; i += 500) {
+    const batch = rows.slice(i, i + 500);
+    await supabase.from('player_tournament_results').upsert(batch, {
+      onConflict: 'tournament_id,player_name',
+    });
+  }
+
+  console.log(`[Snapshot] Saved ${rows.length} player results for tournament ${tournamentId}`);
+  return rows.length;
+}
+
 module.exports = {
   DEFAULT_SCORING,
   generateSeasonPoints,
@@ -390,4 +478,5 @@ module.exports = {
   calculatePlayerPoints,
   calculatePlayerPointsBatch,
   processWeeklyResults,
+  snapshotTournamentResults,
 };
