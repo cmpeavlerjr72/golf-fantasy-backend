@@ -358,6 +358,15 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
       tournamentMap[t.id] = t.name;
     }
 
+    // Get per-player season_scores for these tournaments
+    const { data: seasonScores } = tournamentIds.length > 0
+      ? await supabase
+          .from('season_scores')
+          .select('*')
+          .eq('league_id', league.id)
+          .in('tournament_id', tournamentIds)
+      : { data: [] };
+
     // Group by tournament
     const weeks = {};
     for (const r of weeklyResults || []) {
@@ -368,6 +377,22 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
           results: [],
         };
       }
+
+      // Get this member's player scores for this tournament
+      const playerScores = (seasonScores || [])
+        .filter(s => s.member_id === r.member_id && s.tournament_id === r.tournament_id)
+        .map(s => ({
+          playerName: s.player_name,
+          points: parseFloat(s.points),
+          eagles: s.eagles,
+          birdies: s.birdies,
+          pars: s.pars,
+          bogeys: s.bogeys,
+          doubles_or_worse: s.doubles_or_worse,
+          holes_played: s.holes_played,
+        }))
+        .sort((a, b) => b.points - a.points);
+
       weeks[r.tournament_id].results.push({
         memberId: r.member_id,
         teamName: r.league_members?.team_name,
@@ -375,6 +400,7 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
         weeklyPoints: parseFloat(r.weekly_points),
         position: r.position,
         seasonPoints: parseFloat(r.season_points),
+        players: playerScores,
       });
     }
 
