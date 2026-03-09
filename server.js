@@ -32,6 +32,11 @@ app.get('/privacy', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'privacy-policy.html'));
 });
 
+// Support page
+app.get('/support', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'support.html'));
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/leagues', leagueRoutes);
