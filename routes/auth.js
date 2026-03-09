@@ -87,6 +87,79 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// DELETE /api/auth/account
+router.delete('/account', auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Get all league_members for this user
+    const { data: members } = await supabase
+      .from('league_members')
+      .select('id')
+      .eq('user_id', userId);
+
+    const memberIds = (members || []).map(m => m.id);
+
+    if (memberIds.length > 0) {
+      // 2. Delete trade proposals involving this user's memberships
+      await supabase
+        .from('trade_proposals')
+        .delete()
+        .in('proposer_id', memberIds);
+      await supabase
+        .from('trade_proposals')
+        .delete()
+        .in('target_id', memberIds);
+
+      // 3. Delete transactions for this user's memberships
+      await supabase
+        .from('transactions')
+        .delete()
+        .in('member_id', memberIds);
+
+      // 4. Delete league_members (cascades: draft_picks, rosters, lineups, season_scores, weekly_results)
+      await supabase
+        .from('league_members')
+        .delete()
+        .eq('user_id', userId);
+    }
+
+    // 5. Delete leagues owned by this user
+    const { data: ownedLeagues } = await supabase
+      .from('leagues')
+      .select('id')
+      .eq('owner_id', userId);
+
+    if (ownedLeagues && ownedLeagues.length > 0) {
+      const leagueIds = ownedLeagues.map(l => l.id);
+
+      // Delete all members of owned leagues (cascades their dependent data)
+      await supabase
+        .from('league_members')
+        .delete()
+        .in('league_id', leagueIds);
+
+      await supabase
+        .from('leagues')
+        .delete()
+        .eq('owner_id', userId);
+    }
+
+    // 6. Delete the user
+    const { error } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', userId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete account error:', err);
+    res.status(500).json({ error: 'Failed to delete account' });
+  }
+});
+
 // GET /api/auth/me
 router.get('/me', auth, async (req, res) => {
   try {
