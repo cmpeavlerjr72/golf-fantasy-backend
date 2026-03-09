@@ -295,4 +295,94 @@ router.get('/:leagueId/season-standings', auth, async (req, res) => {
   }
 });
 
+// POST /api/lineups/:leagueId/finalize/:tournamentId — Finalize a tournament week
+router.post('/:leagueId/finalize/:tournamentId', auth, async (req, res) => {
+  try {
+    const { processWeeklyResults } = require('../services/seasonScoring');
+
+    const { data: league } = await supabase
+      .from('leagues')
+      .select('owner_id, league_type')
+      .eq('id', req.params.leagueId)
+      .maybeSingle();
+
+    if (!league || league.league_type !== 'season') {
+      return res.status(400).json({ error: 'Season league only' });
+    }
+
+    const results = await processWeeklyResults(
+      parseInt(req.params.leagueId),
+      parseInt(req.params.tournamentId)
+    );
+
+    res.json({ finalized: true, results: results || [] });
+  } catch (err) {
+    console.error('Finalize week error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/lineups/:leagueId/weekly-history — Get all finalized weekly results
+router.get('/:leagueId/weekly-history', auth, async (req, res) => {
+  try {
+    const { data: league } = await supabase
+      .from('leagues')
+      .select('*')
+      .eq('id', req.params.leagueId)
+      .maybeSingle();
+
+    if (!league || league.league_type !== 'season') {
+      return res.status(400).json({ error: 'Season league only' });
+    }
+
+    const { data: weeklyResults } = await supabase
+      .from('weekly_results')
+      .select('*, league_members(team_name, users(display_name))')
+      .eq('league_id', league.id)
+      .order('tournament_id', { ascending: false })
+      .order('position');
+
+    // Get tournament names
+    const tournamentIds = [...new Set((weeklyResults || []).map(r => r.tournament_id))];
+    let tournaments = [];
+    if (tournamentIds.length > 0) {
+      const { data } = await supabase
+        .from('tournaments')
+        .select('id, name')
+        .in('id', tournamentIds);
+      tournaments = data || [];
+    }
+
+    const tournamentMap = {};
+    for (const t of tournaments) {
+      tournamentMap[t.id] = t.name;
+    }
+
+    // Group by tournament
+    const weeks = {};
+    for (const r of weeklyResults || []) {
+      if (!weeks[r.tournament_id]) {
+        weeks[r.tournament_id] = {
+          tournamentId: r.tournament_id,
+          tournamentName: tournamentMap[r.tournament_id] || 'Unknown',
+          results: [],
+        };
+      }
+      weeks[r.tournament_id].results.push({
+        memberId: r.member_id,
+        teamName: r.league_members?.team_name,
+        displayName: r.league_members?.users?.display_name,
+        weeklyPoints: parseFloat(r.weekly_points),
+        position: r.position,
+        seasonPoints: parseFloat(r.season_points),
+      });
+    }
+
+    res.json(Object.values(weeks));
+  } catch (err) {
+    console.error('Weekly history error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
