@@ -16,7 +16,42 @@ const DEFAULT_SCORING = {
   // Great/poor shot bonuses
   great_shot_bonus: 3.91,     // per great shot
   poor_shot_penalty: -3.91,   // per poor shot
+  // Position-based points (leaderboard finish)
+  position_points: {
+    1: 30, 2: 20, 3: 15, 4: 12, 5: 10,
+    6: 8, 7: 7, 8: 6, 9: 5, 10: 4,
+    top15: 3, top20: 2, top30: 1, other: 0, cut: -5,
+  },
 };
+
+// Parse position string ("1", "T3", "T47", "CUT") into a numeric value
+function parsePosition(pos) {
+  if (!pos) return null;
+  const s = String(pos).trim().toUpperCase();
+  if (s === 'CUT' || s === 'MC' || s === 'WD' || s === 'DQ') return s;
+  const num = parseInt(s.replace(/^T/, ''), 10);
+  return isNaN(num) ? null : num;
+}
+
+// Calculate position points from a position string
+function calcPositionPoints(pos, scoring) {
+  const ppConfig = scoring.position_points || DEFAULT_SCORING.position_points;
+  const parsed = parsePosition(pos);
+  if (parsed === null) return { position_points: 0, position: pos || null };
+  if (typeof parsed === 'string') {
+    // CUT, WD, DQ, MC
+    return { position_points: ppConfig.cut || -5, position: pos };
+  }
+  // Exact position match (1-10)
+  if (ppConfig[parsed] !== undefined) {
+    return { position_points: ppConfig[parsed], position: pos };
+  }
+  // Range-based
+  if (parsed <= 15) return { position_points: ppConfig.top15 || 3, position: pos };
+  if (parsed <= 20) return { position_points: ppConfig.top20 || 2, position: pos };
+  if (parsed <= 30) return { position_points: ppConfig.top30 || 1, position: pos };
+  return { position_points: ppConfig.other || 0, position: pos };
+}
 
 // Generate default season points distribution based on league size
 function generateSeasonPoints(teamCount) {
@@ -140,24 +175,28 @@ async function calcStatBonus(tournamentId, playerName, scoring) {
   return { statPoints: +statPoints.toFixed(2), breakdown };
 }
 
-// Calculate total fantasy points for a single player (holes + stats)
+// Calculate total fantasy points for a single player (holes + stats + position)
 async function calculatePlayerPoints(tournamentId, playerName, scoringConfig) {
   const scoring = { ...DEFAULT_SCORING, ...scoringConfig };
 
-  const { data: holes } = await supabase
-    .from('hole_scores')
-    .select('score, par')
-    .eq('tournament_id', tournamentId)
-    .ilike('player_name', playerName);
+  const [{ data: holes }, { data: playerScore }] = await Promise.all([
+    supabase.from('hole_scores').select('score, par')
+      .eq('tournament_id', tournamentId).ilike('player_name', playerName),
+    supabase.from('player_scores').select('position')
+      .eq('tournament_id', tournamentId).ilike('player_name', playerName).maybeSingle(),
+  ]);
 
   const holeResult = calcHolePoints(holes, scoring);
   const statResult = await calcStatBonus(tournamentId, playerName, scoring);
+  const posResult = calcPositionPoints(playerScore?.position, scoring);
 
   return {
-    points: +(holeResult.points + statResult.statPoints).toFixed(2),
+    points: +(holeResult.points + statResult.statPoints + posResult.position_points).toFixed(2),
     hole_points: holeResult.points,
     stat_points: statResult.statPoints,
     stat_breakdown: statResult.breakdown,
+    position_points: posResult.position_points,
+    position: posResult.position,
     eagles: holeResult.eagles,
     birdies: holeResult.birdies,
     pars: holeResult.pars,
@@ -177,9 +216,9 @@ async function calculateWeeklyPoints(leagueId, memberId, tournamentId, scoringCo
     .eq('tournament_id', tournamentId)
     .eq('slot', 'starter');
 
-  if (!lineup || lineup.length === 0) return { points: 0, hole_points: 0, stat_points: 0 };
+  if (!lineup || lineup.length === 0) return { points: 0, hole_points: 0, stat_points: 0, position_points: 0 };
 
-  let totalPoints = 0, totalHole = 0, totalStat = 0;
+  let totalPoints = 0, totalHole = 0, totalStat = 0, totalPos = 0;
   let eagles = 0, birdies = 0, pars = 0, bogeys = 0, doubles = 0, holesPlayed = 0;
 
   for (const starter of lineup) {
@@ -187,6 +226,7 @@ async function calculateWeeklyPoints(leagueId, memberId, tournamentId, scoringCo
     totalPoints += calc.points;
     totalHole += calc.hole_points;
     totalStat += calc.stat_points;
+    totalPos += calc.position_points || 0;
     eagles += calc.eagles;
     birdies += calc.birdies;
     pars += calc.pars;
@@ -199,6 +239,7 @@ async function calculateWeeklyPoints(leagueId, memberId, tournamentId, scoringCo
     points: +totalPoints.toFixed(2),
     hole_points: +totalHole.toFixed(2),
     stat_points: +totalStat.toFixed(2),
+    position_points: +totalPos.toFixed(2),
     eagles, birdies, pars, bogeys, doubles_or_worse: doubles, holes_played: holesPlayed,
   };
 }
@@ -304,10 +345,11 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
     return all;
   }
 
-  const [allHoles, { data: allStats }, { data: fieldAvg }] = await Promise.all([
+  const [allHoles, { data: allStats }, { data: fieldAvg }, { data: allPositions }] = await Promise.all([
     fetchAllHoles(tournamentId),
     supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
     supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
+    supabase.from('player_scores').select('player_name, position').eq('tournament_id', tournamentId),
   ]);
 
   // Build lookup maps
@@ -321,6 +363,11 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
   const statsByPlayer = {};
   for (const s of allStats || []) {
     statsByPlayer[s.player_name.toLowerCase()] = s;
+  }
+
+  const positionByPlayer = {};
+  for (const p of allPositions || []) {
+    positionByPlayer[p.player_name.toLowerCase()] = p.position;
   }
 
   // Calculate for each player in memory
@@ -368,11 +415,15 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
 
     statPoints = +statPoints.toFixed(2);
 
+    const posResult = calcPositionPoints(positionByPlayer[key], scoring);
+
     results[name] = {
-      points: +(holeResult.points + statPoints).toFixed(2),
+      points: +(holeResult.points + statPoints + posResult.position_points).toFixed(2),
       hole_points: holeResult.points,
       stat_points: statPoints,
       stat_breakdown: breakdown,
+      position_points: posResult.position_points,
+      position: posResult.position,
       eagles: holeResult.eagles,
       birdies: holeResult.birdies,
       pars: holeResult.pars,
@@ -402,11 +453,18 @@ async function snapshotTournamentResults(tournamentId) {
     from += PAGE;
   }
 
-  // Fetch stats and field averages
-  const [{ data: allStats }, { data: fieldAvg }] = await Promise.all([
+  // Fetch stats, field averages, and positions
+  const [{ data: allStats }, { data: fieldAvg }, { data: allPositions }] = await Promise.all([
     supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
     supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
+    supabase.from('player_scores').select('player_name, position').eq('tournament_id', tournamentId),
   ]);
+
+  // Build position lookup
+  const positionMap = {};
+  for (const p of allPositions || []) {
+    positionMap[p.player_name] = p.position;
+  }
 
   // Build hole counts per player
   const playerHoles = {};
@@ -454,6 +512,7 @@ async function snapshotTournamentResults(tournamentId) {
       field_avg_accuracy: fieldAvg?.avg_accuracy || null,
       field_avg_gir: fieldAvg?.avg_gir || null,
       field_avg_distance: fieldAvg?.avg_distance || null,
+      position: positionMap[name] || null,
       updated_at: new Date().toISOString(),
     });
   }
@@ -479,4 +538,6 @@ module.exports = {
   calculatePlayerPointsBatch,
   processWeeklyResults,
   snapshotTournamentResults,
+  parsePosition,
+  calcPositionPoints,
 };

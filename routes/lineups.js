@@ -202,19 +202,20 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
       const starters = memberLineup.filter(l => l.slot === 'starter');
       const benchPlayers = memberLineup.filter(l => l.slot === 'bench');
 
-      let teamPoints = 0, teamHolePoints = 0, teamStatPoints = 0;
+      let teamPoints = 0, teamHolePoints = 0, teamStatPoints = 0, teamPosPoints = 0;
       const players = [];
 
       for (const starter of starters) {
-        const calc = pointsMap[starter.player_name] || { points: 0, hole_points: 0, stat_points: 0, holes_played: 0 };
+        const calc = pointsMap[starter.player_name] || { points: 0, hole_points: 0, stat_points: 0, position_points: 0, holes_played: 0 };
         teamPoints += calc.points;
         teamHolePoints += calc.hole_points;
         teamStatPoints += calc.stat_points;
+        teamPosPoints += calc.position_points || 0;
         players.push({ playerName: starter.player_name, slot: 'starter', ...calc });
       }
 
       for (const bp of benchPlayers) {
-        players.push({ playerName: bp.player_name, slot: 'bench', points: 0, hole_points: 0, stat_points: 0, holes_played: 0 });
+        players.push({ playerName: bp.player_name, slot: 'bench', points: 0, hole_points: 0, stat_points: 0, position_points: 0, holes_played: 0 });
       }
 
       return {
@@ -225,6 +226,7 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
         totalPoints: +teamPoints.toFixed(2),
         holePoints: +teamHolePoints.toFixed(2),
         statPoints: +teamStatPoints.toFixed(2),
+        positionPoints: +teamPosPoints.toFixed(2),
         players,
       };
     });
@@ -255,30 +257,28 @@ router.get('/:leagueId/season-standings', auth, async (req, res) => {
       .select('id, team_name, users(display_name)')
       .eq('league_id', league.id);
 
-    const { data: scores } = await supabase
-      .from('season_scores')
+    const { data: weeklyResults } = await supabase
+      .from('weekly_results')
       .select('*')
       .eq('league_id', league.id);
 
     const standings = (members || []).map(member => {
-      const memberScores = (scores || []).filter(s => s.member_id === member.id);
-      const totalPoints = memberScores.reduce((sum, s) => sum + parseFloat(s.points), 0);
-      const totalEagles = memberScores.reduce((sum, s) => sum + s.eagles, 0);
-      const totalBirdies = memberScores.reduce((sum, s) => sum + s.birdies, 0);
-      const totalPars = memberScores.reduce((sum, s) => sum + s.pars, 0);
-      const totalBogeys = memberScores.reduce((sum, s) => sum + s.bogeys, 0);
-      const tournamentsPlayed = new Set(memberScores.map(s => s.tournament_id)).size;
+      const memberResults = (weeklyResults || []).filter(r => r.member_id === member.id);
+      const totalSeasonPoints = memberResults.reduce((sum, r) => sum + parseFloat(r.season_points || 0), 0);
+      const totalFantasyPoints = memberResults.reduce((sum, r) => sum + parseFloat(r.weekly_points || 0), 0);
+      const tournamentsPlayed = memberResults.length;
+      const avgPosition = tournamentsPlayed > 0
+        ? +(memberResults.reduce((sum, r) => sum + r.position, 0) / tournamentsPlayed).toFixed(1)
+        : null;
 
       return {
         memberId: member.id,
         teamName: member.team_name,
         displayName: member.users?.display_name,
-        totalPoints,
+        totalPoints: totalSeasonPoints,
+        totalFantasyPoints: +totalFantasyPoints.toFixed(2),
         tournamentsPlayed,
-        totalEagles,
-        totalBirdies,
-        totalPars,
-        totalBogeys,
+        avgPosition,
       };
     });
 
@@ -325,7 +325,7 @@ router.post('/:leagueId/finalize/:tournamentId', auth, async (req, res) => {
 // GET /api/lineups/:leagueId/weekly-history — Get all finalized weekly results
 router.get('/:leagueId/weekly-history', auth, async (req, res) => {
   try {
-    const { DEFAULT_SCORING } = require('../services/seasonScoring');
+    const { DEFAULT_SCORING, calcPositionPoints } = require('../services/seasonScoring');
 
     const { data: league } = await supabase
       .from('leagues')
@@ -435,11 +435,15 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
 
       statPoints = +statPoints.toFixed(2);
 
+      const posResult = calcPositionPoints(raw.position, scoring);
+
       return {
-        points: +(holePoints + statPoints).toFixed(2),
+        points: +(holePoints + statPoints + posResult.position_points).toFixed(2),
         hole_points: +holePoints.toFixed(2),
         stat_points: statPoints,
         stat_breakdown: statBreakdown,
+        position_points: posResult.position_points,
+        position: posResult.position,
         eagles: raw.eagles || 0,
         birdies: raw.birdies || 0,
         pars: raw.pars || 0,
