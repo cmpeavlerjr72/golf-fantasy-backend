@@ -596,17 +596,39 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
       const posResult = calcPositionPoints(r.position, scoring);
       const totalPoints = +(holePoints + statPoints + posResult.position_points).toFixed(2);
 
+      // Individual stat point breakdowns
+      let firPts = 0, girPts = 0, distPts = 0, greatPts = 0, poorPts = 0;
+      if (r.accuracy != null && r.field_avg_accuracy != null) {
+        firPts = +((r.accuracy - r.field_avg_accuracy) * (scoring.fir_multiplier || 0)).toFixed(2);
+      }
+      if (r.gir != null && r.field_avg_gir != null) {
+        girPts = +((r.gir - r.field_avg_gir) * (scoring.gir_multiplier || 0)).toFixed(2);
+      }
+      if (r.distance != null && r.field_avg_distance != null) {
+        distPts = +((r.distance - r.field_avg_distance) * (scoring.distance_multiplier || 0)).toFixed(2);
+      }
+      if (r.great_shots != null) {
+        greatPts = +(r.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
+      }
+      if (r.poor_shots != null) {
+        poorPts = +(r.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
+      }
+
       resultsByPlayer[key].push({
         tournamentId: r.tournament_id,
         tournamentName: tournamentMap[r.tournament_id] || 'Unknown',
         points: totalPoints,
-        holePoints: +holePoints.toFixed(2),
-        statPoints: +statPoints.toFixed(2),
         posPoints: posResult.position_points,
         position: posResult.position,
+        holePoints: +holePoints.toFixed(2),
+        eagles: r.eagles || 0,
+        birdies: r.birdies || 0,
+        pars: r.pars || 0,
+        bogeys: r.bogeys || 0,
+        doubles: r.doubles_or_worse || 0,
+        statPoints: +statPoints.toFixed(2),
+        firPts, girPts, distPts, greatPts, poorPts,
         holesPlayed: r.holes_played || 0,
-        birdies: (r.eagles || 0) + (r.birdies || 0),
-        bogeys: (r.bogeys || 0) + (r.doubles_or_worse || 0),
       });
     }
 
