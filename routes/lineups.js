@@ -600,8 +600,13 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
         tournamentId: r.tournament_id,
         tournamentName: tournamentMap[r.tournament_id] || 'Unknown',
         points: totalPoints,
+        holePoints: +holePoints.toFixed(2),
+        statPoints: +statPoints.toFixed(2),
+        posPoints: posResult.position_points,
         position: posResult.position,
         holesPlayed: r.holes_played || 0,
+        birdies: (r.eagles || 0) + (r.birdies || 0),
+        bogeys: (r.bogeys || 0) + (r.doubles_or_worse || 0),
       });
     }
 
