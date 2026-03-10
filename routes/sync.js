@@ -1,6 +1,6 @@
 const express = require('express');
 const auth = require('../middleware/auth');
-const { syncAll, syncPlayerStats, syncLiveScores, syncTournament } = require('../services/datagolf');
+const { syncAll, syncPlayerStats, syncLiveScores, syncTournament, backfillHistoricalTournaments } = require('../services/datagolf');
 
 const router = express.Router();
 
@@ -109,6 +109,18 @@ router.get('/debug', auth, async (req, res) => {
   } catch (err) {
     console.error('Debug error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/sync/backfill — Backfill historical 2026 tournament data from DG
+router.post('/backfill', auth, async (req, res) => {
+  try {
+    console.log('[Backfill] Starting 2026 tournament backfill...');
+    const result = await backfillHistoricalTournaments();
+    res.json(result);
+  } catch (err) {
+    console.error('Backfill error:', err);
+    res.status(500).json({ error: 'Backfill failed: ' + err.message });
   }
 });
 

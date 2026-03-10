@@ -496,4 +496,148 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
   }
 });
 
+// GET /api/lineups/:leagueId/all-players — All DG players with roster ownership + tournament history
+router.get('/:leagueId/all-players', auth, async (req, res) => {
+  try {
+    const { DEFAULT_SCORING, calcPositionPoints } = require('../services/seasonScoring');
+
+    const { data: league } = await supabase
+      .from('leagues')
+      .select('*')
+      .eq('id', req.params.leagueId)
+      .maybeSingle();
+
+    if (!league || league.league_type !== 'season') {
+      return res.status(400).json({ error: 'Season league only' });
+    }
+
+    const scoring = { ...DEFAULT_SCORING, ...(league.scoring_config || {}) };
+
+    // Fetch all data in parallel
+    const [
+      { data: allPlayers },
+      { data: allRosters },
+      { data: members },
+      { data: tournamentResults },
+      { data: tournaments },
+    ] = await Promise.all([
+      supabase.from('player_stats')
+        .select('player_name, owgr_rank, dg_rank, sg_total')
+        .order('dg_rank', { ascending: true, nullsFirst: false }),
+      supabase.from('rosters')
+        .select('player_name, member_id')
+        .eq('league_id', league.id),
+      supabase.from('league_members')
+        .select('id, team_name, user_id')
+        .eq('league_id', league.id),
+      supabase.from('player_tournament_results')
+        .select('*'),
+      supabase.from('tournaments')
+        .select('id, name, start_date')
+        .order('start_date', { ascending: true }),
+    ]);
+
+    // Build roster ownership map: player_name (lower) -> { teamName, memberId, isMe }
+    const memberMap = {};
+    for (const m of members || []) {
+      memberMap[m.id] = { teamName: m.team_name, isMe: m.user_id === req.user.id };
+    }
+
+    const ownershipMap = {};
+    for (const r of allRosters || []) {
+      const member = memberMap[r.member_id];
+      if (member) {
+        ownershipMap[r.player_name.toLowerCase()] = {
+          teamName: member.teamName,
+          isMe: member.isMe,
+        };
+      }
+    }
+
+    // Build tournament lookup
+    const tournamentMap = {};
+    const tournamentList = [];
+    for (const t of tournaments || []) {
+      tournamentMap[t.id] = t.name;
+      tournamentList.push({ id: t.id, name: t.name });
+    }
+
+    // Build tournament results by player: player_name (lower) -> [{ tournamentId, points, ... }]
+    const resultsByPlayer = {};
+    for (const r of tournamentResults || []) {
+      const key = r.player_name.toLowerCase();
+      if (!resultsByPlayer[key]) resultsByPlayer[key] = [];
+
+      // Calculate fantasy points using league scoring
+      const holePoints =
+        (r.eagles || 0) * scoring.eagle +
+        (r.birdies || 0) * scoring.birdie +
+        (r.pars || 0) * scoring.par +
+        (r.bogeys || 0) * scoring.bogey +
+        (r.doubles_or_worse || 0) * scoring.double_bogey;
+
+      let statPoints = 0;
+      if (r.accuracy != null && r.field_avg_accuracy != null) {
+        statPoints += (r.accuracy - r.field_avg_accuracy) * (scoring.fir_multiplier || 0);
+      }
+      if (r.gir != null && r.field_avg_gir != null) {
+        statPoints += (r.gir - r.field_avg_gir) * (scoring.gir_multiplier || 0);
+      }
+      if (r.distance != null && r.field_avg_distance != null) {
+        statPoints += (r.distance - r.field_avg_distance) * (scoring.distance_multiplier || 0);
+      }
+      if (r.great_shots != null) {
+        statPoints += r.great_shots * (scoring.great_shot_bonus || 0);
+      }
+      if (r.poor_shots != null) {
+        statPoints += r.poor_shots * (scoring.poor_shot_penalty || 0);
+      }
+
+      const posResult = calcPositionPoints(r.position, scoring);
+      const totalPoints = +(holePoints + statPoints + posResult.position_points).toFixed(2);
+
+      resultsByPlayer[key].push({
+        tournamentId: r.tournament_id,
+        tournamentName: tournamentMap[r.tournament_id] || 'Unknown',
+        points: totalPoints,
+        position: posResult.position,
+        holesPlayed: r.holes_played || 0,
+      });
+    }
+
+    // Sort each player's results by tournament date order
+    const tournamentOrder = {};
+    (tournaments || []).forEach((t, i) => { tournamentOrder[t.id] = i; });
+    for (const key of Object.keys(resultsByPlayer)) {
+      resultsByPlayer[key].sort((a, b) => (tournamentOrder[a.tournamentId] || 0) - (tournamentOrder[b.tournamentId] || 0));
+    }
+
+    // Build player list
+    const players = (allPlayers || []).map(p => {
+      const key = p.player_name.toLowerCase();
+      const owner = ownershipMap[key] || null;
+      const history = resultsByPlayer[key] || [];
+
+      return {
+        playerName: p.player_name,
+        dgRank: p.dg_rank,
+        owgrRank: p.owgr_rank,
+        sgTotal: parseFloat(p.sg_total),
+        owner: owner ? { teamName: owner.teamName, isMe: owner.isMe } : null,
+        history,
+      };
+    });
+
+    // Get finalized tournament IDs that have results (for the grid columns)
+    const finalizedTournaments = tournamentList.filter(t =>
+      (tournamentResults || []).some(r => r.tournament_id === t.id)
+    );
+
+    res.json({ players, tournaments: finalizedTournaments });
+  } catch (err) {
+    console.error('All players error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

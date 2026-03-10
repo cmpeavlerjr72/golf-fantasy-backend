@@ -317,4 +317,180 @@ async function syncAll() {
   };
 }
 
-module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes, syncTournamentStats };
+// Backfill historical 2026 tournament data into our DB
+// Fetches event list + round-level data from DG historical endpoints,
+// aggregates into tournament-level results, and stores in player_tournament_results
+async function backfillHistoricalTournaments() {
+  console.log('[Backfill] Fetching 2026 PGA event list...');
+  const eventList = await dgFetch('/historical-raw-data/event-list?tour=pga');
+
+  // Filter to 2026 events only
+  const events2026 = (eventList || []).filter(e =>
+    e.calendar_year === 2026 || String(e.calendar_year) === '2026'
+  );
+
+  if (events2026.length === 0) {
+    console.log('[Backfill] No 2026 events found');
+    return { eventsProcessed: 0 };
+  }
+
+  console.log(`[Backfill] Found ${events2026.length} events for 2026`);
+
+  const results = [];
+
+  for (const event of events2026) {
+    const eventId = event.event_id;
+    const eventName = event.event_name;
+    console.log(`[Backfill] Processing: ${eventName} (${eventId})...`);
+
+    // Fetch round-level data for this event
+    let rounds;
+    try {
+      rounds = await dgFetch(`/historical-raw-data/rounds?tour=pga&event_id=${eventId}&year=2026`);
+    } catch (err) {
+      console.log(`[Backfill] Skipping ${eventName}: ${err.message}`);
+      continue;
+    }
+
+    if (!rounds || !Array.isArray(rounds) || rounds.length === 0) {
+      console.log(`[Backfill] No round data for ${eventName}, skipping`);
+      continue;
+    }
+
+    // Create or find tournament record
+    const { data: existing } = await supabase
+      .from('tournaments')
+      .select('id')
+      .eq('name', eventName)
+      .eq('year', 2026)
+      .maybeSingle();
+
+    let tournamentId;
+    if (existing) {
+      tournamentId = existing.id;
+    } else {
+      // Determine dates from the event data if available
+      const { data: newTourney } = await supabase
+        .from('tournaments')
+        .insert({
+          name: eventName,
+          year: 2026,
+          start_date: event.date || null,
+          is_active: false,
+          status: 'completed',
+        })
+        .select()
+        .single();
+      tournamentId = newTourney.id;
+    }
+
+    // Aggregate round data per player
+    const playerRounds = {};
+    for (const r of rounds) {
+      const name = r.player_name;
+      if (!name) continue;
+      if (!playerRounds[name]) {
+        playerRounds[name] = {
+          fin_text: r.fin_text || null,
+          dg_id: r.dg_id || null,
+          rounds: [],
+        };
+      }
+      playerRounds[name].rounds.push(r);
+      // fin_text is the same across all rounds for a player
+      if (r.fin_text) playerRounds[name].fin_text = r.fin_text;
+    }
+
+    // Calculate field averages and build player results
+    let totalAcc = 0, totalGir = 0, totalDist = 0;
+    let countAcc = 0, countGir = 0, countDist = 0;
+    const playerResults = [];
+
+    for (const [name, data] of Object.entries(playerRounds)) {
+      const roundCount = data.rounds.length;
+      let sumAcc = 0, sumGir = 0, sumDist = 0;
+      let hasAcc = 0, hasGir = 0, hasDist = 0;
+      let totalHoles = 0;
+
+      for (const r of data.rounds) {
+        totalHoles += 18; // Standard round
+        if (r.driving_acc != null) { sumAcc += r.driving_acc; hasAcc++; }
+        if (r.gir != null) { sumGir += r.gir; hasGir++; }
+        if (r.driving_dist != null) { sumDist += r.driving_dist; hasDist++; }
+      }
+
+      const avgAcc = hasAcc > 0 ? sumAcc / hasAcc : null;
+      const avgGir = hasGir > 0 ? sumGir / hasGir : null;
+      const avgDist = hasDist > 0 ? sumDist / hasDist : null;
+
+      if (avgAcc != null) { totalAcc += avgAcc; countAcc++; }
+      if (avgGir != null) { totalGir += avgGir; countGir++; }
+      if (avgDist != null) { totalDist += avgDist; countDist++; }
+
+      playerResults.push({
+        name,
+        fin_text: data.fin_text,
+        accuracy: avgAcc,
+        gir: avgGir,
+        distance: avgDist,
+        holes_played: totalHoles,
+      });
+    }
+
+    // Calculate field averages
+    const fieldAvgAcc = countAcc > 0 ? totalAcc / countAcc : null;
+    const fieldAvgGir = countGir > 0 ? totalGir / countGir : null;
+    const fieldAvgDist = countDist > 0 ? totalDist / countDist : null;
+
+    // Store field averages
+    await supabase
+      .from('tournament_field_averages')
+      .upsert({
+        tournament_id: tournamentId,
+        avg_accuracy: fieldAvgAcc,
+        avg_gir: fieldAvgGir,
+        avg_distance: fieldAvgDist,
+        player_count: playerResults.length,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'tournament_id' });
+
+    // Build player_tournament_results rows
+    const rows = playerResults.map(p => ({
+      tournament_id: tournamentId,
+      player_name: p.name,
+      position: p.fin_text,
+      accuracy: p.accuracy,
+      gir: p.gir,
+      distance: p.distance,
+      // Hole-by-hole counts not available from historical data
+      eagles: null,
+      birdies: null,
+      pars: null,
+      bogeys: null,
+      doubles_or_worse: null,
+      holes_played: p.holes_played,
+      great_shots: null,
+      poor_shots: null,
+      field_avg_accuracy: fieldAvgAcc,
+      field_avg_gir: fieldAvgGir,
+      field_avg_distance: fieldAvgDist,
+      updated_at: new Date().toISOString(),
+    }));
+
+    // Upsert in batches
+    for (let i = 0; i < rows.length; i += 500) {
+      const batch = rows.slice(i, i + 500);
+      await supabase.from('player_tournament_results').upsert(batch, {
+        onConflict: 'tournament_id,player_name',
+      });
+    }
+
+    console.log(`[Backfill] ${eventName}: ${rows.length} players stored`);
+    results.push({ event: eventName, players: rows.length, tournamentId });
+  }
+
+  console.log(`[Backfill] Complete! Processed ${results.length} tournaments`);
+  return { eventsProcessed: results.length, details: results };
+}
+
+module.exports = { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes, syncTournamentStats, backfillHistoricalTournaments };
