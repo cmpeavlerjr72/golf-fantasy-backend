@@ -24,6 +24,14 @@ async function syncTournament() {
     .maybeSingle();
 
   let tournamentId;
+  const newStatus = field.current_round > 0 ? 'in_progress' : 'upcoming';
+
+  // Deactivate all other tournaments whenever we set a new active one
+  await supabase
+    .from('tournaments')
+    .update({ is_active: false })
+    .eq('is_active', true);
+
   if (existing) {
     await supabase
       .from('tournaments')
@@ -31,17 +39,22 @@ async function syncTournament() {
         start_date: field.date_start,
         end_date: field.date_end,
         is_active: true,
-        status: field.current_round > 0 ? 'in_progress' : 'upcoming',
+        status: newStatus,
       })
       .eq('id', existing.id);
     tournamentId = existing.id;
-  } else {
-    // Deactivate all other tournaments
-    await supabase
-      .from('tournaments')
-      .update({ is_active: false })
-      .eq('is_active', true);
 
+    // If tournament hasn't started yet, clear any stale scoring data
+    if (newStatus === 'upcoming') {
+      console.log(`[Sync] Tournament "${field.event_name}" is upcoming — clearing stale scoring data for ID ${tournamentId}`);
+      await Promise.all([
+        supabase.from('hole_scores').delete().eq('tournament_id', tournamentId),
+        supabase.from('player_scores').delete().eq('tournament_id', tournamentId),
+        supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId),
+        supabase.from('tournament_field_averages').delete().eq('tournament_id', tournamentId),
+      ]);
+    }
+  } else {
     const { data: newTourney } = await supabase
       .from('tournaments')
       .insert({
@@ -50,7 +63,7 @@ async function syncTournament() {
         start_date: field.date_start,
         end_date: field.date_end,
         is_active: true,
-        status: field.current_round > 0 ? 'in_progress' : 'upcoming',
+        status: newStatus,
       })
       .select()
       .single();
@@ -297,13 +310,26 @@ async function syncTeeTimes(tournamentId, fieldData) {
 async function syncAll() {
   const { tournamentId, eventName, field } = await syncTournament();
   const statsCount = await syncPlayerStats();
-  const scoresCount = await syncLiveScores(tournamentId);
-  const holeCount = await syncHoleScores(tournamentId);
-  const teeTimeCount = await syncTeeTimes(tournamentId, field);
-  const tournStatCount = await syncTournamentStats(tournamentId).catch(err => {
-    console.error('Tournament stats sync error (may not be live yet):', err.message);
-    return 0;
-  });
+
+  // Check if tournament has started — skip live scoring sync if not
+  const { data: tourney } = await supabase.from('tournaments').select('status').eq('id', tournamentId).single();
+  const isLive = tourney?.status === 'in_progress';
+
+  let scoresCount = 0, holeCount = 0, teeTimeCount = 0, tournStatCount = 0;
+
+  if (isLive) {
+    scoresCount = await syncLiveScores(tournamentId);
+    holeCount = await syncHoleScores(tournamentId);
+    tournStatCount = await syncTournamentStats(tournamentId).catch(err => {
+      console.error('Tournament stats sync error (may not be live yet):', err.message);
+      return 0;
+    });
+  } else {
+    console.log(`[Sync] Tournament "${eventName}" is upcoming — skipping live score sync`);
+  }
+
+  // Always sync tee times (available before tournament starts)
+  teeTimeCount = await syncTeeTimes(tournamentId, field);
 
   return {
     tournament: eventName,
