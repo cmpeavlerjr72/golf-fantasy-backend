@@ -324,36 +324,43 @@ async function backfillHistoricalTournaments() {
   console.log('[Backfill] Fetching 2026 PGA event list...');
   const eventList = await dgFetch('/historical-raw-data/event-list?tour=pga');
 
-  // Filter to 2026 events only
-  const events2026 = (eventList || []).filter(e =>
-    e.calendar_year === 2026 || String(e.calendar_year) === '2026'
-  );
+  // Filter to 2026 completed events only (date is in the past)
+  const now = new Date();
+  const events2026 = (eventList || []).filter(e => {
+    const isYear = e.calendar_year === 2026 || String(e.calendar_year) === '2026';
+    // Only backfill events that have already finished (date is in the past)
+    const eventDate = e.date ? new Date(e.date) : null;
+    const isCompleted = eventDate && eventDate < now;
+    return isYear && isCompleted;
+  });
 
   if (events2026.length === 0) {
-    console.log('[Backfill] No 2026 events found');
+    console.log('[Backfill] No completed 2026 events found');
     return { eventsProcessed: 0 };
   }
 
-  console.log(`[Backfill] Found ${events2026.length} events for 2026`);
+  console.log(`[Backfill] Found ${events2026.length} completed events for 2026`);
 
   const results = [];
 
   for (const event of events2026) {
     const eventId = event.event_id;
     const eventName = event.event_name;
-    console.log(`[Backfill] Processing: ${eventName} (${eventId})...`);
+    console.log(`[Backfill] Processing: ${eventName} (event_id=${eventId})...`);
 
     // Fetch round-level data for this event
-    let rounds;
+    // Response format: { event_id, event_name, scores: [ { player_name, fin_text, dg_id, round_1: {...}, round_2: {...}, ... } ] }
+    let data;
     try {
-      rounds = await dgFetch(`/historical-raw-data/rounds?tour=pga&event_id=${eventId}&year=2026`);
+      data = await dgFetch(`/historical-raw-data/rounds?tour=pga&event_id=${eventId}&year=2026`);
     } catch (err) {
       console.log(`[Backfill] Skipping ${eventName}: ${err.message}`);
       continue;
     }
 
-    if (!rounds || !Array.isArray(rounds) || rounds.length === 0) {
-      console.log(`[Backfill] No round data for ${eventName}, skipping`);
+    const scores = data?.scores;
+    if (!scores || !Array.isArray(scores) || scores.length === 0) {
+      console.log(`[Backfill] No scores for ${eventName}, skipping`);
       continue;
     }
 
@@ -369,7 +376,6 @@ async function backfillHistoricalTournaments() {
     if (existing) {
       tournamentId = existing.id;
     } else {
-      // Determine dates from the event data if available
       const { data: newTourney } = await supabase
         .from('tournaments')
         .insert({
@@ -384,39 +390,39 @@ async function backfillHistoricalTournaments() {
       tournamentId = newTourney.id;
     }
 
-    // Aggregate round data per player
-    const playerRounds = {};
-    for (const r of rounds) {
-      const name = r.player_name;
-      if (!name) continue;
-      if (!playerRounds[name]) {
-        playerRounds[name] = {
-          fin_text: r.fin_text || null,
-          dg_id: r.dg_id || null,
-          rounds: [],
-        };
-      }
-      playerRounds[name].rounds.push(r);
-      // fin_text is the same across all rounds for a player
-      if (r.fin_text) playerRounds[name].fin_text = r.fin_text;
-    }
-
-    // Calculate field averages and build player results
+    // Aggregate per-player data from nested round objects
+    // Each player has round_1, round_2, round_3, round_4 with stats per round
     let totalAcc = 0, totalGir = 0, totalDist = 0;
     let countAcc = 0, countGir = 0, countDist = 0;
+    let totalGreat = 0, totalPoor = 0, countAll = 0;
     const playerResults = [];
 
-    for (const [name, data] of Object.entries(playerRounds)) {
-      const roundCount = data.rounds.length;
+    for (const player of scores) {
+      const name = player.player_name;
+      if (!name) continue;
+
+      // Collect all rounds for this player (round_1, round_2, round_3, round_4)
+      const roundKeys = ['round_1', 'round_2', 'round_3', 'round_4'].filter(k => player[k]);
+      if (roundKeys.length === 0) continue;
+
+      let eagles = 0, birdies = 0, pars = 0, bogeys = 0, doublesOrWorse = 0;
+      let greatShots = 0, poorShots = 0;
       let sumAcc = 0, sumGir = 0, sumDist = 0;
       let hasAcc = 0, hasGir = 0, hasDist = 0;
-      let totalHoles = 0;
+      const holesPlayed = roundKeys.length * 18;
 
-      for (const r of data.rounds) {
-        totalHoles += 18; // Standard round
-        if (r.driving_acc != null) { sumAcc += r.driving_acc; hasAcc++; }
-        if (r.gir != null) { sumGir += r.gir; hasGir++; }
-        if (r.driving_dist != null) { sumDist += r.driving_dist; hasDist++; }
+      for (const rk of roundKeys) {
+        const rd = player[rk];
+        eagles += rd.eagles_or_better || 0;
+        birdies += rd.birdies || 0;
+        pars += rd.pars || 0;
+        bogeys += rd.bogies || 0;
+        doublesOrWorse += rd.doubles_or_worse || 0;
+        greatShots += rd.great_shots || 0;
+        poorShots += rd.poor_shots || 0;
+        if (rd.driving_acc != null) { sumAcc += rd.driving_acc; hasAcc++; }
+        if (rd.gir != null) { sumGir += rd.gir; hasGir++; }
+        if (rd.driving_dist != null) { sumDist += rd.driving_dist; hasDist++; }
       }
 
       const avgAcc = hasAcc > 0 ? sumAcc / hasAcc : null;
@@ -426,14 +432,19 @@ async function backfillHistoricalTournaments() {
       if (avgAcc != null) { totalAcc += avgAcc; countAcc++; }
       if (avgGir != null) { totalGir += avgGir; countGir++; }
       if (avgDist != null) { totalDist += avgDist; countDist++; }
+      totalGreat += greatShots;
+      totalPoor += poorShots;
+      countAll++;
 
       playerResults.push({
         name,
-        fin_text: data.fin_text,
+        fin_text: player.fin_text || null,
+        eagles, birdies, pars, bogeys, doublesOrWorse,
+        greatShots, poorShots,
         accuracy: avgAcc,
         gir: avgGir,
         distance: avgDist,
-        holes_played: totalHoles,
+        holesPlayed,
       });
     }
 
@@ -450,7 +461,9 @@ async function backfillHistoricalTournaments() {
         avg_accuracy: fieldAvgAcc,
         avg_gir: fieldAvgGir,
         avg_distance: fieldAvgDist,
-        player_count: playerResults.length,
+        avg_great_shots: countAll > 0 ? totalGreat / countAll : null,
+        avg_poor_shots: countAll > 0 ? totalPoor / countAll : null,
+        player_count: countAll,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'tournament_id' });
 
@@ -459,18 +472,17 @@ async function backfillHistoricalTournaments() {
       tournament_id: tournamentId,
       player_name: p.name,
       position: p.fin_text,
+      eagles: p.eagles,
+      birdies: p.birdies,
+      pars: p.pars,
+      bogeys: p.bogeys,
+      doubles_or_worse: p.doublesOrWorse,
+      holes_played: p.holesPlayed,
       accuracy: p.accuracy,
       gir: p.gir,
       distance: p.distance,
-      // Hole-by-hole counts not available from historical data
-      eagles: null,
-      birdies: null,
-      pars: null,
-      bogeys: null,
-      doubles_or_worse: null,
-      holes_played: p.holes_played,
-      great_shots: null,
-      poor_shots: null,
+      great_shots: p.greatShots,
+      poor_shots: p.poorShots,
       field_avg_accuracy: fieldAvgAcc,
       field_avg_gir: fieldAvgGir,
       field_avg_distance: fieldAvgDist,
