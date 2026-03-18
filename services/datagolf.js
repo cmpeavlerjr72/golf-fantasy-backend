@@ -24,7 +24,12 @@ async function syncTournament() {
     .maybeSingle();
 
   let tournamentId;
-  const newStatus = field.current_round > 0 ? 'in_progress' : 'upcoming';
+  // Determine status from start_date — DG's current_round can be stale
+  // (still showing last week's data before the new tournament begins)
+  const startDate = field.date_start ? new Date(field.date_start) : null;
+  const now = new Date();
+  const hasStarted = startDate && now >= startDate;
+  const newStatus = hasStarted ? 'in_progress' : 'upcoming';
 
   // Deactivate all other tournaments whenever we set a new active one
   await supabase

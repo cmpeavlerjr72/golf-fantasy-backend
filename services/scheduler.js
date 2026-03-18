@@ -75,15 +75,27 @@ async function tick() {
 
   try {
     if (tournamentDay) {
-      // Tournament day: sync live scores + hole scores + tournament stats every 5 min
-      console.log(`[Scheduler] ${label} — syncing live scores + hole scores + stats...`);
+      // Tournament day: sync tournament info, then live data only if actually started
+      console.log(`[Scheduler] ${label} — syncing tournament info...`);
       const { tournamentId } = await syncTournament();
-      const [scoreCount, holeCount, statCount] = await Promise.all([
-        syncLiveScores(tournamentId),
-        syncHoleScores(tournamentId),
-        syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
-      ]);
-      console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
+
+      // Verify the tournament has actually started before syncing live scores
+      const { data: tourney } = await supabase
+        .from('tournaments')
+        .select('status')
+        .eq('id', tournamentId)
+        .single();
+
+      if (tourney?.status === 'in_progress') {
+        const [scoreCount, holeCount, statCount] = await Promise.all([
+          syncLiveScores(tournamentId),
+          syncHoleScores(tournamentId),
+          syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
+        ]);
+        console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
+      } else {
+        console.log(`[Scheduler] Tournament not started yet — skipping live score sync`);
+      }
     } else {
       // Off day: sync field/tournament info + tee times
       try {
