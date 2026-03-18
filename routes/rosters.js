@@ -28,6 +28,26 @@ async function getMemberAndLeague(req, res) {
   return { league, member };
 }
 
+// Batch check lock status: fetch all round-1 tee times for a tournament,
+// return a Set of locked player names (case-insensitive)
+async function getLockedPlayers(tournamentId) {
+  if (!tournamentId) return new Set();
+  const { data: teeTimes } = await supabase
+    .from('tee_times')
+    .select('player_name, tee_time, round_num')
+    .eq('tournament_id', tournamentId)
+    .eq('round_num', 1);
+
+  const now = new Date();
+  const locked = new Set();
+  for (const tt of teeTimes || []) {
+    if (new Date(tt.tee_time) <= now) {
+      locked.add(tt.player_name.toLowerCase());
+    }
+  }
+  return locked;
+}
+
 // GET /api/rosters/:leagueId — Get my current roster
 router.get('/:leagueId', auth, async (req, res) => {
   try {
@@ -41,27 +61,22 @@ router.get('/:leagueId', auth, async (req, res) => {
       .eq('member_id', ctx.member.id)
       .order('acquired_at');
 
-    // Check lock status for each player
     const { data: tournament } = await supabase
       .from('tournaments')
       .select('id')
       .eq('is_active', true)
       .maybeSingle();
 
-    const players = [];
-    for (const r of roster || []) {
-      let locked = false;
-      if (tournament) {
-        locked = await isPlayerLocked(tournament.id, r.player_name);
-      }
-      players.push({
-        playerName: r.player_name,
-        dgId: r.dg_id,
-        acquiredVia: r.acquired_via,
-        acquiredAt: r.acquired_at,
-        locked,
-      });
-    }
+    // Batch lock check instead of per-player query
+    const lockedSet = await getLockedPlayers(tournament?.id);
+
+    const players = (roster || []).map(r => ({
+      playerName: r.player_name,
+      dgId: r.dg_id,
+      acquiredVia: r.acquired_via,
+      acquiredAt: r.acquired_at,
+      locked: lockedSet.has(r.player_name.toLowerCase()),
+    }));
 
     res.json({ roster: players, rosterSize: ctx.league.roster_size });
   } catch (err) {
@@ -90,28 +105,24 @@ router.get('/:leagueId/free-agents', auth, async (req, res) => {
       .select('player_name, owgr_rank, dg_rank, sg_total')
       .order('dg_rank', { ascending: true, nullsFirst: false });
 
-    // Check lock status
+    // Batch lock check instead of per-player query
     const { data: tournament } = await supabase
       .from('tournaments')
       .select('id')
       .eq('is_active', true)
       .maybeSingle();
 
+    const lockedSet = await getLockedPlayers(tournament?.id);
+
     const freeAgents = [];
     for (const p of allPlayers || []) {
       if (rosteredNames.has(p.player_name.toLowerCase())) continue;
-
-      let locked = false;
-      if (tournament) {
-        locked = await isPlayerLocked(tournament.id, p.player_name);
-      }
-
       freeAgents.push({
         playerName: p.player_name,
         owgrRank: p.owgr_rank,
         dgRank: p.dg_rank,
         sgTotal: parseFloat(p.sg_total),
-        locked,
+        locked: lockedSet.has(p.player_name.toLowerCase()),
       });
     }
 
@@ -249,6 +260,16 @@ router.post('/:leagueId/drop', auth, async (req, res) => {
 // GET /api/rosters/:leagueId/transactions — Transaction history
 router.get('/:leagueId/transactions', auth, async (req, res) => {
   try {
+    // Verify league membership
+    const { data: member } = await supabase
+      .from('league_members')
+      .select('id')
+      .eq('league_id', req.params.leagueId)
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!member) return res.status(403).json({ error: 'Not a member of this league' });
+
     const { data } = await supabase
       .from('transactions')
       .select('*, league_members(team_name)')

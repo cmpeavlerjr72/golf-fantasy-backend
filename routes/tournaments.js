@@ -1,6 +1,7 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const auth = require('../middleware/auth');
+const cache = require('../services/cache');
 
 const router = express.Router();
 
@@ -96,6 +97,9 @@ router.get('/active', auth, async (req, res) => {
 // GET /api/tournaments/leaderboard
 router.get('/leaderboard', auth, async (req, res) => {
   try {
+    const cached = cache.get('leaderboard');
+    if (cached) return res.json(cached);
+
     const { data: tournament } = await supabase
       .from('tournaments')
       .select('*')
@@ -114,7 +118,7 @@ router.get('/leaderboard', auth, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    const result = {
       tournament,
       leaderboard: (scores || []).map(s => ({
         playerName: s.player_name,
@@ -127,7 +131,10 @@ router.get('/leaderboard', auth, async (req, res) => {
         round3: s.round3,
         round4: s.round4,
       })),
-    });
+    };
+
+    cache.set('leaderboard', result, 60_000); // 1 min cache
+    res.json(result);
   } catch (err) {
     console.error('Leaderboard error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -137,20 +144,24 @@ router.get('/leaderboard', auth, async (req, res) => {
 // GET /api/tournaments/player-stats?tour=pga
 router.get('/player-stats', auth, async (req, res) => {
   try {
+    const wantTour = req.query.tour || 'all';
+    const cacheKey = `player-stats:${wantTour}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return res.json(cached);
+
     let query = supabase
       .from('player_stats')
       .select('*')
       .order('dg_rank', { ascending: true, nullsFirst: false });
 
-    const wantTour = req.query.tour;
-    if (wantTour) {
+    if (wantTour !== 'all') {
       query = query.eq('primary_tour', wantTour);
     }
 
     let { data, error } = await query;
 
     // Fallback: if tour filter returned nothing (column not populated yet), return all
-    if (wantTour && (!data || data.length === 0) && !error) {
+    if (wantTour !== 'all' && (!data || data.length === 0) && !error) {
       const fallback = await supabase
         .from('player_stats')
         .select('*')
@@ -161,7 +172,7 @@ router.get('/player-stats', auth, async (req, res) => {
 
     if (error) throw error;
 
-    res.json((data || []).map(p => ({
+    const result = (data || []).map(p => ({
       playerName: p.player_name,
       owgrRank: p.owgr_rank,
       dgRank: p.dg_rank,
@@ -176,7 +187,10 @@ router.get('/player-stats', auth, async (req, res) => {
       top5Pct: parseFloat(p.top5_pct),
       top10Pct: parseFloat(p.top10_pct),
       top20Pct: parseFloat(p.top20_pct),
-    })));
+    }));
+
+    cache.set(cacheKey, result, 5 * 60_000); // 5 min cache
+    res.json(result);
   } catch (err) {
     console.error('Player stats error:', err);
     res.status(500).json({ error: 'Server error' });

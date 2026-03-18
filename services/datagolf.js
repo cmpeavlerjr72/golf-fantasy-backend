@@ -6,7 +6,7 @@ const DG_KEY = process.env.DATAGOLF_API_KEY;
 async function dgFetch(path) {
   const sep = path.includes('?') ? '&' : '?';
   const url = `${DG_BASE}${path}${sep}file_format=json&key=${DG_KEY}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`DataGolf ${path}: ${res.status}`);
   return res.json();
 }
@@ -108,9 +108,6 @@ async function syncPlayerStats() {
     predMap.set(p.dg_id, p);
   }
 
-  // Clear existing stats and insert fresh
-  await supabase.from('player_stats').delete().neq('id', 0);
-
   const rows = [];
   for (const r of rankings.rankings || []) {
     const sk = skillMap.get(r.dg_id) || {};
@@ -136,7 +133,9 @@ async function syncPlayerStats() {
     });
   }
 
-  // Insert in batches of 500
+  // Clear and immediately re-insert (minimize gap)
+  // TODO: switch to upsert once UNIQUE(player_name) constraint is added to player_stats
+  await supabase.from('player_stats').delete().neq('id', 0);
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
     const { error } = await supabase.from('player_stats').insert(batch);
@@ -149,9 +148,6 @@ async function syncPlayerStats() {
 // Sync live scores from in-play predictions
 async function syncLiveScores(tournamentId) {
   const live = await dgFetch('/preds/in-play');
-
-  // Clear existing scores for this tournament
-  await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
 
   const rows = (live.data || []).map((p, i) => ({
     tournament_id: tournamentId,
@@ -167,6 +163,9 @@ async function syncLiveScores(tournamentId) {
     updated_at: new Date().toISOString(),
   }));
 
+  // Clear and immediately re-insert (minimize gap)
+  // TODO: switch to upsert once UNIQUE(tournament_id, player_name) constraint is added
+  await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
     const { error } = await supabase.from('player_scores').insert(batch);
@@ -179,9 +178,6 @@ async function syncLiveScores(tournamentId) {
 // Sync hole-by-hole scores from live-hole-scores endpoint
 async function syncHoleScores(tournamentId) {
   const data = await dgFetch('/preds/live-hole-scores?tour=pga');
-
-  // Clear existing hole scores for this tournament
-  await supabase.from('hole_scores').delete().eq('tournament_id', tournamentId);
 
   const rows = [];
   for (const player of data.players || []) {
@@ -201,11 +197,13 @@ async function syncHoleScores(tournamentId) {
     }
   }
 
-  // Insert in batches of 500
+  // Upsert atomically — no gap where hole data disappears
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    const { error } = await supabase.from('hole_scores').insert(batch);
-    if (error) console.error('Hole scores insert error:', error.message);
+    const { error } = await supabase.from('hole_scores').upsert(batch, {
+      onConflict: 'tournament_id,player_name,round_num,hole',
+    });
+    if (error) console.error('Hole scores upsert error:', error.message);
   }
 
   return rows.length;
@@ -223,9 +221,6 @@ async function syncTournamentStats(tournamentId) {
     console.error('No live_stats in tournament stats response. Keys:', Object.keys(stats || {}));
     return 0;
   }
-
-  // Clear existing stats for this tournament
-  await supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId);
 
   const rows = [];
   let totalAcc = 0, totalGir = 0, totalDist = 0, totalGreat = 0, totalPoor = 0;
@@ -261,11 +256,13 @@ async function syncTournamentStats(tournamentId) {
     if (p.poor_shots != null) totalPoor += p.poor_shots;
   }
 
-  // Insert player stats in batches
+  // Upsert player stats atomically
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    const { error } = await supabase.from('tournament_stats').insert(batch);
-    if (error) console.error('Tournament stats insert error:', error.message);
+    const { error } = await supabase.from('tournament_stats').upsert(batch, {
+      onConflict: 'tournament_id,player_name',
+    });
+    if (error) console.error('Tournament stats upsert error:', error.message);
   }
 
   // Calculate and store field averages
@@ -295,9 +292,6 @@ async function syncTeeTimes(tournamentId, fieldData) {
     fieldData = field.field;
   }
 
-  // Clear existing tee times for this tournament
-  await supabase.from('tee_times').delete().eq('tournament_id', tournamentId);
-
   const rows = [];
   for (const player of fieldData || []) {
     for (const tt of player.teetimes || []) {
@@ -312,7 +306,9 @@ async function syncTeeTimes(tournamentId, fieldData) {
     }
   }
 
-  // Insert in batches of 500
+  // Tee times can change — clear and re-insert (OK here since tee times
+  // are not used in scoring, only for lock detection)
+  await supabase.from('tee_times').delete().eq('tournament_id', tournamentId);
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
     const { error } = await supabase.from('tee_times').insert(batch);

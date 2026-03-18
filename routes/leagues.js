@@ -21,6 +21,9 @@ router.post('/', auth, async (req, res) => {
   if (!name || !teamName) {
     return res.status(400).json({ error: 'League name and your team name are required' });
   }
+  if (typeof name !== 'string' || name.length > 100 || typeof teamName !== 'string' || teamName.length > 50) {
+    return res.status(400).json({ error: 'League name (max 100) and team name (max 50) must be valid strings' });
+  }
 
   const isPool = leagueType === 'pool';
 
@@ -85,6 +88,9 @@ router.post('/join', auth, async (req, res) => {
   if (!inviteCode || !teamName) {
     return res.status(400).json({ error: 'Invite code and team name are required' });
   }
+  if (typeof teamName !== 'string' || teamName.length > 50) {
+    return res.status(400).json({ error: 'Team name must be a string (max 50 characters)' });
+  }
 
   try {
     const { data: league } = await supabase
@@ -144,21 +150,29 @@ router.get('/', auth, async (req, res) => {
   try {
     const { data: memberships, error } = await supabase
       .from('league_members')
-      .select('team_name, leagues(*)')
+      .select('team_name, league_id, leagues(*)')
       .eq('user_id', req.user.id)
       .order('created_at', { referencedTable: 'leagues', ascending: false });
 
     if (error) throw error;
 
-    const results = [];
-    for (const m of memberships || []) {
-      const league = m.leagues;
-      const { count } = await supabase
+    // Batch-fetch member counts for all leagues in one query instead of N
+    const leagueIds = (memberships || []).map(m => m.league_id);
+    let countMap = {};
+    if (leagueIds.length > 0) {
+      const { data: allMembers } = await supabase
         .from('league_members')
-        .select('*', { count: 'exact', head: true })
-        .eq('league_id', league.id);
+        .select('league_id')
+        .in('league_id', leagueIds);
 
-      results.push({
+      for (const m of allMembers || []) {
+        countMap[m.league_id] = (countMap[m.league_id] || 0) + 1;
+      }
+    }
+
+    const results = (memberships || []).map(m => {
+      const league = m.leagues;
+      return {
         id: league.id,
         name: league.name,
         inviteCode: league.invite_code,
@@ -166,11 +180,11 @@ router.get('/', auth, async (req, res) => {
         leagueType: league.league_type,
         maxTeams: league.max_teams,
         tournamentId: league.tournament_id,
-        memberCount: count,
+        memberCount: countMap[league.id] || 0,
         myTeamName: m.team_name,
         isOwner: league.owner_id === req.user.id,
-      });
-    }
+      };
+    });
 
     res.json(results);
   } catch (err) {

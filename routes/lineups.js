@@ -1,6 +1,7 @@
 const express = require('express');
 const supabase = require('../config/supabase');
 const auth = require('../middleware/auth');
+const cache = require('../services/cache');
 
 const router = express.Router();
 
@@ -170,6 +171,11 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
   try {
     const { calculatePlayerPointsBatch } = require('../services/seasonScoring');
 
+    // Cache per league for 30 seconds (scores update every 5 min from sync)
+    const cacheKey = `weekly-scores:${req.params.leagueId}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return res.json(cached);
+
     const [{ data: league }, { data: tournament }] = await Promise.all([
       supabase.from('leagues').select('*').eq('id', req.params.leagueId).maybeSingle(),
       supabase.from('tournaments').select('id, name').eq('is_active', true).maybeSingle(),
@@ -232,7 +238,9 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
     });
 
     teams.sort((a, b) => b.totalPoints - a.totalPoints);
-    res.json({ tournament, teams });
+    const result = { tournament, teams };
+    cache.set(cacheKey, result, 30_000); // 30 sec cache
+    res.json(result);
   } catch (err) {
     console.error('Weekly scores error:', err);
     res.status(500).json({ error: 'Server error' });

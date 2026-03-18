@@ -1,7 +1,13 @@
 const supabase = require('../config/supabase');
 const jwt = require('jsonwebtoken');
 
+const MAX_CONNECTIONS_PER_USER = 5;
+const PICK_COOLDOWN_MS = 1000; // 1 sec between picks
+
 function setupDraftSocket(io) {
+  // Track connections per user to prevent abuse
+  const userConnections = new Map(); // userId -> count
+
   io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Authentication required'));
@@ -9,6 +15,14 @@ function setupDraftSocket(io) {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       socket.user = decoded;
+
+      // Enforce per-user connection limit
+      const count = userConnections.get(decoded.id) || 0;
+      if (count >= MAX_CONNECTIONS_PER_USER) {
+        return next(new Error('Too many connections'));
+      }
+      userConnections.set(decoded.id, count + 1);
+
       next();
     } catch (err) {
       next(new Error('Invalid token'));
@@ -16,10 +30,12 @@ function setupDraftSocket(io) {
   });
 
   io.on('connection', (socket) => {
-    console.log(`User ${socket.user.id} connected`);
+    let lastPickTime = 0;
 
     socket.on('join-draft', async ({ leagueId }) => {
       try {
+        if (!leagueId || typeof leagueId !== 'number') return;
+
         const { data: member } = await supabase
           .from('league_members')
           .select('*, leagues(*)')
@@ -43,6 +59,8 @@ function setupDraftSocket(io) {
 
     socket.on('start-draft', async ({ leagueId }) => {
       try {
+        if (!leagueId || typeof leagueId !== 'number') return;
+
         const { data: league } = await supabase
           .from('leagues')
           .select('*')
@@ -81,6 +99,16 @@ function setupDraftSocket(io) {
 
     socket.on('draft-pick', async ({ leagueId, playerName, playerId }) => {
       try {
+        if (!leagueId || !playerName || typeof playerName !== 'string') return;
+
+        // Rate limit picks
+        const now = Date.now();
+        if (now - lastPickTime < PICK_COOLDOWN_MS) {
+          socket.emit('draft-error', { message: 'Too fast, please wait' });
+          return;
+        }
+        lastPickTime = now;
+
         const { data: league } = await supabase
           .from('leagues')
           .select('*')
@@ -134,7 +162,11 @@ function setupDraftSocket(io) {
             pick_number: currentPick + 1,
           });
 
-        if (error) throw error;
+        if (error) {
+          // UNIQUE constraint violation = race condition, another pick landed first
+          socket.emit('draft-error', { message: 'Pick failed, please try again' });
+          return;
+        }
 
         // Check if draft is complete
         if (currentPick + 1 >= totalPicks) {
@@ -173,29 +205,30 @@ function setupDraftSocket(io) {
     });
 
     socket.on('disconnect', () => {
-      console.log(`User ${socket.user.id} disconnected`);
+      // Clean up connection count
+      const userId = socket.user?.id;
+      if (userId) {
+        const count = userConnections.get(userId) || 1;
+        if (count <= 1) {
+          userConnections.delete(userId);
+        } else {
+          userConnections.set(userId, count - 1);
+        }
+      }
     });
   });
 }
 
 async function getDraftState(leagueId) {
-  const { data: league } = await supabase
-    .from('leagues')
-    .select('*')
-    .eq('id', leagueId)
-    .single();
-
-  const { data: members } = await supabase
-    .from('league_members')
-    .select('id, team_name, draft_order, user_id, users(display_name)')
-    .eq('league_id', leagueId)
-    .order('draft_order');
-
-  const { data: picks } = await supabase
-    .from('draft_picks')
-    .select('*, league_members(team_name)')
-    .eq('league_id', leagueId)
-    .order('pick_number');
+  const [{ data: league }, { data: members }, { data: picks }] = await Promise.all([
+    supabase.from('leagues').select('*').eq('id', leagueId).single(),
+    supabase.from('league_members')
+      .select('id, team_name, draft_order, user_id, users(display_name)')
+      .eq('league_id', leagueId).order('draft_order'),
+    supabase.from('draft_picks')
+      .select('*, league_members(team_name)')
+      .eq('league_id', leagueId).order('pick_number'),
+  ]);
 
   const currentPick = picks ? picks.length : 0;
   const totalPicks = (members || []).length * league.draft_rounds;

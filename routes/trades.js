@@ -92,6 +92,16 @@ router.post('/:leagueId', auth, async (req, res) => {
 // GET /api/trades/:leagueId — List trades (pending + recent)
 router.get('/:leagueId', auth, async (req, res) => {
   try {
+    // Verify league membership
+    const { data: member } = await supabase
+      .from('league_members')
+      .select('id')
+      .eq('league_id', req.params.leagueId)
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!member) return res.status(403).json({ error: 'Not a member of this league' });
+
     const { data } = await supabase
       .from('trade_proposals')
       .select(`
