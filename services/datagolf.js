@@ -133,13 +133,13 @@ async function syncPlayerStats() {
     });
   }
 
-  // Clear and immediately re-insert (minimize gap)
-  // TODO: switch to upsert once UNIQUE(player_name) constraint is added to player_stats
-  await supabase.from('player_stats').delete().neq('id', 0);
+  // Atomic upsert — no gap where player data disappears
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    const { error } = await supabase.from('player_stats').insert(batch);
-    if (error) console.error('Stats insert error:', error.message);
+    const { error } = await supabase.from('player_stats').upsert(batch, {
+      onConflict: 'player_name',
+    });
+    if (error) console.error('Stats upsert error:', error.message);
   }
 
   return rows.length;
@@ -163,13 +163,13 @@ async function syncLiveScores(tournamentId) {
     updated_at: new Date().toISOString(),
   }));
 
-  // Clear and immediately re-insert (minimize gap)
-  // TODO: switch to upsert once UNIQUE(tournament_id, player_name) constraint is added
-  await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
+  // Atomic upsert — no gap where scores disappear
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    const { error } = await supabase.from('player_scores').insert(batch);
-    if (error) console.error('Scores insert error:', error.message);
+    const { error } = await supabase.from('player_scores').upsert(batch, {
+      onConflict: 'tournament_id,player_name',
+    });
+    if (error) console.error('Scores upsert error:', error.message);
   }
 
   return rows.length;
