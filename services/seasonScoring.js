@@ -271,11 +271,51 @@ async function processWeeklyResults(leagueId, tournamentId) {
     results.push({ memberId: member.id, ...calc });
   }
 
+  // Skip weeks where every team scored 0 (no one set a lineup)
+  const allZero = results.every(r => r.points === 0);
+  if (allZero) {
+    console.log(`[Scoring] Skipping tournament ${tournamentId} for league ${leagueId} — all teams scored 0`);
+    // Clean up any previously stored bad results for this week
+    await supabase
+      .from('weekly_results')
+      .delete()
+      .eq('league_id', leagueId)
+      .eq('tournament_id', tournamentId);
+    await supabase
+      .from('season_scores')
+      .delete()
+      .eq('league_id', leagueId)
+      .eq('tournament_id', tournamentId);
+    return [];
+  }
+
   results.sort((a, b) => b.points - a.points);
-  results.forEach((r, i) => {
-    r.position = i + 1;
-    r.seasonPoints = seasonPointsDist[i] || seasonPointsDist[seasonPointsDist.length - 1] || 25;
-  });
+
+  // Assign positions and season points with tie handling:
+  // Tied teams share the same position (e.g. T2) and split the combined
+  // season points for the positions they span, like prize money in golf.
+  let i = 0;
+  while (i < results.length) {
+    // Find the extent of the tie group starting at position i
+    let j = i + 1;
+    while (j < results.length && results[j].points === results[i].points) {
+      j++;
+    }
+    const tiedCount = j - i;
+    // Sum the season points for positions i through j-1 and divide evenly
+    let totalSeasonPts = 0;
+    for (let k = i; k < j; k++) {
+      totalSeasonPts += seasonPointsDist[k] || seasonPointsDist[seasonPointsDist.length - 1] || 25;
+    }
+    const sharedPts = +(totalSeasonPts / tiedCount).toFixed(2);
+    const position = i + 1; // 1-indexed position
+
+    for (let k = i; k < j; k++) {
+      results[k].position = position;
+      results[k].seasonPoints = sharedPts;
+    }
+    i = j;
+  }
 
   for (const r of results) {
     await supabase
