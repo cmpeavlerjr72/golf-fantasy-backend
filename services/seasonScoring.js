@@ -8,9 +8,9 @@ const DEFAULT_SCORING = {
   par: 0.5,
   bogey: -1,
   double_bogey: -3,
-  // Flat stat points
-  fir_points: 20,          // pts × FIR% (e.g. 0.65 FIR = 13 pts)
-  gir_points: 25,          // pts × GIR% (e.g. 0.70 GIR = 17.5 pts)
+  // Flat stat points (per actual fairway/green hit)
+  pts_per_fairway: 0.5,    // per fairway hit (e.g. 36 fairways × 0.5 = 18 pts)
+  pts_per_green: 0.5,      // per green in regulation (e.g. 50 greens × 0.5 = 25 pts)
   dist_per_yard: 0.1,      // per yard of avg driving distance (310 yds = 31 pts)
   // Shot quality bonuses (flat per shot)
   great_shot_bonus: 2,
@@ -109,25 +109,30 @@ function calcHolePoints(holes, scoring) {
   return { points, eagles, birdies, pars, bogeys, doubles_or_worse: doubles, holes_played: holesPlayed };
 }
 
-// Calculate flat stat points for a single player (no field averages needed)
-function calcFlatStatPoints(playerStats, scoring) {
+// Calculate flat stat points for a single player
+// holesPlayed is used to convert FIR%/GIR% to actual counts
+function calcFlatStatPoints(playerStats, scoring, holesPlayed) {
   if (!playerStats) return { statPoints: 0, breakdown: {} };
 
   let statPoints = 0;
   const breakdown = {};
+  const hp = holesPlayed || playerStats.holes_played || 72;
 
-  // Fairways hit: flat rate × FIR percentage
+  // Fairways hit: convert FIR% to count (14 driving holes per 18) then award per-fairway pts
   if (playerStats.accuracy != null) {
-    const firPts = +(playerStats.accuracy * (scoring.fir_points || 0)).toFixed(2);
+    const drivingHoles = Math.round(hp * 14 / 18);
+    const fairwaysHit = Math.round(playerStats.accuracy * drivingHoles);
+    const firPts = +(fairwaysHit * (scoring.pts_per_fairway || 0)).toFixed(2);
     statPoints += firPts;
-    breakdown.fir = { value: playerStats.accuracy, pts: firPts };
+    breakdown.fir = { value: playerStats.accuracy, count: fairwaysHit, total: drivingHoles, pts: firPts };
   }
 
-  // Greens in regulation: flat rate × GIR percentage
+  // Greens in regulation: convert GIR% to count then award per-green pts
   if (playerStats.gir != null) {
-    const girPts = +(playerStats.gir * (scoring.gir_points || 0)).toFixed(2);
+    const greensHit = Math.round(playerStats.gir * hp);
+    const girPts = +(greensHit * (scoring.pts_per_green || 0)).toFixed(2);
     statPoints += girPts;
-    breakdown.gir = { value: playerStats.gir, pts: girPts };
+    breakdown.gir = { value: playerStats.gir, count: greensHit, total: hp, pts: girPts };
   }
 
   // Driving distance: flat rate per yard
@@ -168,7 +173,7 @@ async function calculatePlayerPoints(tournamentId, playerName, scoringConfig) {
   ]);
 
   const holeResult = calcHolePoints(holes, scoring);
-  const statResult = calcFlatStatPoints(playerStats, scoring);
+  const statResult = calcFlatStatPoints(playerStats, scoring, holeResult.holes_played);
   const posResult = calcPositionPoints(playerScore?.position, scoring);
 
   return {
@@ -375,7 +380,7 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
     const key = name.toLowerCase();
     const holes = holesByPlayer[key] || [];
     const holeResult = calcHolePoints(holes, scoring);
-    const statResult = calcFlatStatPoints(statsByPlayer[key], scoring);
+    const statResult = calcFlatStatPoints(statsByPlayer[key], scoring, holeResult.holes_played);
     const posResult = calcPositionPoints(positionByPlayer[key], scoring);
 
     results[name] = {
