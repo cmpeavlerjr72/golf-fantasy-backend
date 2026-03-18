@@ -45,14 +45,25 @@ async function syncTournament() {
     tournamentId = existing.id;
 
     // If tournament hasn't started yet, clear any stale scoring data
+    // But ONLY if it doesn't already have finalized results (weekly_results) or a snapshot
     if (newStatus === 'upcoming') {
-      console.log(`[Sync] Tournament "${field.event_name}" is upcoming — clearing stale scoring data for ID ${tournamentId}`);
-      await Promise.all([
-        supabase.from('hole_scores').delete().eq('tournament_id', tournamentId),
-        supabase.from('player_scores').delete().eq('tournament_id', tournamentId),
-        supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId),
-        supabase.from('tournament_field_averages').delete().eq('tournament_id', tournamentId),
-      ]);
+      const { data: hasResults } = await supabase
+        .from('player_tournament_results')
+        .select('id')
+        .eq('tournament_id', tournamentId)
+        .limit(1);
+
+      if (!hasResults || hasResults.length === 0) {
+        console.log(`[Sync] Tournament "${field.event_name}" is upcoming — clearing stale scoring data for ID ${tournamentId}`);
+        await Promise.all([
+          supabase.from('hole_scores').delete().eq('tournament_id', tournamentId),
+          supabase.from('player_scores').delete().eq('tournament_id', tournamentId),
+          supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId),
+          supabase.from('tournament_field_averages').delete().eq('tournament_id', tournamentId),
+        ]);
+      } else {
+        console.log(`[Sync] Tournament "${field.event_name}" marked upcoming but has snapshot data — skipping data clear`);
+      }
     }
   } else {
     const { data: newTourney } = await supabase

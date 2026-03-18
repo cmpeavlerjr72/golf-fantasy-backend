@@ -112,6 +112,59 @@ router.get('/debug', auth, async (req, res) => {
   }
 });
 
+// POST /api/sync/finalize-all — Catch up on any missed tournament finalizations
+router.post('/finalize-all', auth, async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const { processWeeklyResults } = require('../services/seasonScoring');
+
+    const cutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+    const { data: completedTournaments } = await supabase
+      .from('tournaments')
+      .select('id, name, end_date')
+      .eq('is_active', false)
+      .lte('end_date', cutoff)
+      .order('id', { ascending: false });
+
+    const { data: leagues } = await supabase
+      .from('leagues')
+      .select('id, name')
+      .eq('league_type', 'season')
+      .eq('status', 'active');
+
+    const finalized = [];
+    for (const tournament of completedTournaments || []) {
+      for (const league of leagues || []) {
+        const { data: existing } = await supabase
+          .from('weekly_results')
+          .select('id')
+          .eq('league_id', league.id)
+          .eq('tournament_id', tournament.id)
+          .limit(1);
+
+        if (existing && existing.length > 0) continue;
+
+        const { data: hasScores } = await supabase
+          .from('hole_scores')
+          .select('id')
+          .eq('tournament_id', tournament.id)
+          .limit(1);
+
+        if (!hasScores || hasScores.length === 0) continue;
+
+        await processWeeklyResults(league.id, tournament.id);
+        finalized.push({ league: league.name, leagueId: league.id, tournament: tournament.name, tournamentId: tournament.id });
+      }
+    }
+
+    res.json({ finalized, count: finalized.length });
+  } catch (err) {
+    console.error('Finalize-all error:', err);
+    res.status(500).json({ error: 'Finalize-all failed: ' + err.message });
+  }
+});
+
 // POST /api/sync/backfill — Backfill historical 2026 tournament data from DG
 router.post('/backfill', auth, async (req, res) => {
   try {
