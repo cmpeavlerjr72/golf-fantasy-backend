@@ -333,7 +333,7 @@ router.post('/:leagueId/finalize/:tournamentId', auth, async (req, res) => {
 // GET /api/lineups/:leagueId/weekly-history — Get all finalized weekly results
 router.get('/:leagueId/weekly-history', auth, async (req, res) => {
   try {
-    const { DEFAULT_SCORING, calcPositionPoints } = require('../services/seasonScoring');
+    const { DEFAULT_SCORING, calcPositionPoints, calcFlatStatPoints } = require('../services/seasonScoring');
 
     const { data: league } = await supabase
       .from('leagues')
@@ -354,53 +354,37 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
       .order('tournament_id', { ascending: false })
       .order('position');
 
-    // Get tournament names
     const tournamentIds = [...new Set((weeklyResults || []).map(r => r.tournament_id))];
     let tournaments = [];
     if (tournamentIds.length > 0) {
-      const { data } = await supabase
-        .from('tournaments')
-        .select('id, name')
-        .in('id', tournamentIds);
+      const { data } = await supabase.from('tournaments').select('id, name').in('id', tournamentIds);
       tournaments = data || [];
     }
 
     const tournamentMap = {};
-    for (const t of tournaments) {
-      tournamentMap[t.id] = t.name;
-    }
+    for (const t of tournaments) tournamentMap[t.id] = t.name;
 
-    // Get the players each member had set for each tournament (from lineups)
     let allLineups = [];
     if (tournamentIds.length > 0) {
-      const { data } = await supabase
-        .from('lineups')
+      const { data } = await supabase.from('lineups')
         .select('member_id, tournament_id, player_name, slot')
-        .eq('league_id', league.id)
-        .in('tournament_id', tournamentIds)
-        .eq('slot', 'starter');
+        .eq('league_id', league.id).in('tournament_id', tournamentIds).eq('slot', 'starter');
       allLineups = data || [];
     }
 
-    // Get raw player results from the master table
     let allPlayerResults = [];
     if (tournamentIds.length > 0) {
-      const { data } = await supabase
-        .from('player_tournament_results')
-        .select('*')
-        .in('tournament_id', tournamentIds);
+      const { data } = await supabase.from('player_tournament_results').select('*').in('tournament_id', tournamentIds);
       allPlayerResults = data || [];
     }
 
-    // Index player results by tournament+player_name
     const resultsByKey = {};
     for (const r of allPlayerResults) {
       resultsByKey[`${r.tournament_id}:${r.player_name.toLowerCase()}`] = r;
     }
 
-    // Apply league scoring to raw stats
+    // Apply league scoring to raw stats (flat system)
     function calcPlayerPoints(raw) {
-      // Hole points
       const holePoints =
         (raw.eagles || 0) * scoring.eagle +
         (raw.birdies || 0) * scoring.birdie +
@@ -408,48 +392,14 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
         (raw.bogeys || 0) * scoring.bogey +
         (raw.doubles_or_worse || 0) * scoring.double_bogey;
 
-      // Stat bonus points
-      let statPoints = 0;
-      const statBreakdown = {};
-
-      if (raw.accuracy != null && raw.field_avg_accuracy != null) {
-        const firDiff = raw.accuracy - raw.field_avg_accuracy;
-        const firPts = +(firDiff * (scoring.fir_multiplier || 0)).toFixed(2);
-        statPoints += firPts;
-        statBreakdown.fir = { value: raw.accuracy, avg: raw.field_avg_accuracy, pts: firPts };
-      }
-      if (raw.gir != null && raw.field_avg_gir != null) {
-        const girDiff = raw.gir - raw.field_avg_gir;
-        const girPts = +(girDiff * (scoring.gir_multiplier || 0)).toFixed(2);
-        statPoints += girPts;
-        statBreakdown.gir = { value: raw.gir, avg: raw.field_avg_gir, pts: girPts };
-      }
-      if (raw.distance != null && raw.field_avg_distance != null) {
-        const distDiff = raw.distance - raw.field_avg_distance;
-        const distPts = +(distDiff * (scoring.distance_multiplier || 0)).toFixed(2);
-        statPoints += distPts;
-        statBreakdown.distance = { value: raw.distance, avg: raw.field_avg_distance, pts: distPts };
-      }
-      if (raw.great_shots != null) {
-        const greatPts = +(raw.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
-        statPoints += greatPts;
-        statBreakdown.great_shots = { count: raw.great_shots, pts: greatPts };
-      }
-      if (raw.poor_shots != null) {
-        const poorPts = +(raw.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
-        statPoints += poorPts;
-        statBreakdown.poor_shots = { count: raw.poor_shots, pts: poorPts };
-      }
-
-      statPoints = +statPoints.toFixed(2);
-
+      const statResult = calcFlatStatPoints(raw, scoring);
       const posResult = calcPositionPoints(raw.position, scoring);
 
       return {
-        points: +(holePoints + statPoints + posResult.position_points).toFixed(2),
+        points: +(holePoints + statResult.statPoints + posResult.position_points).toFixed(2),
         hole_points: +holePoints.toFixed(2),
-        stat_points: statPoints,
-        stat_breakdown: statBreakdown,
+        stat_points: statResult.statPoints,
+        stat_breakdown: statResult.breakdown,
         position_points: posResult.position_points,
         position: posResult.position,
         eagles: raw.eagles || 0,
@@ -507,7 +457,7 @@ router.get('/:leagueId/weekly-history', auth, async (req, res) => {
 // GET /api/lineups/:leagueId/all-players — All DG players with roster ownership + tournament history
 router.get('/:leagueId/all-players', auth, async (req, res) => {
   try {
-    const { DEFAULT_SCORING, calcPositionPoints } = require('../services/seasonScoring');
+    const { DEFAULT_SCORING, calcPositionPoints, calcFlatStatPoints } = require('../services/seasonScoring');
 
     const { data: league } = await supabase
       .from('leagues')
@@ -521,7 +471,6 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
 
     const scoring = { ...DEFAULT_SCORING, ...(league.scoring_config || {}) };
 
-    // Fetch all data in parallel
     const [
       { data: allPlayers },
       { data: allRosters },
@@ -538,14 +487,12 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
       supabase.from('league_members')
         .select('id, team_name, user_id')
         .eq('league_id', league.id),
-      supabase.from('player_tournament_results')
-        .select('*'),
+      supabase.from('player_tournament_results').select('*'),
       supabase.from('tournaments')
         .select('id, name, start_date')
         .order('start_date', { ascending: true }),
     ]);
 
-    // Build roster ownership map: player_name (lower) -> { teamName, memberId, isMe }
     const memberMap = {};
     for (const m of members || []) {
       memberMap[m.id] = { teamName: m.team_name, isMe: m.user_id === req.user.id };
@@ -555,14 +502,10 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
     for (const r of allRosters || []) {
       const member = memberMap[r.member_id];
       if (member) {
-        ownershipMap[r.player_name.toLowerCase()] = {
-          teamName: member.teamName,
-          isMe: member.isMe,
-        };
+        ownershipMap[r.player_name.toLowerCase()] = { teamName: member.teamName, isMe: member.isMe };
       }
     }
 
-    // Build tournament lookup
     const tournamentMap = {};
     const tournamentList = [];
     for (const t of tournaments || []) {
@@ -570,13 +513,12 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
       tournamentList.push({ id: t.id, name: t.name });
     }
 
-    // Build tournament results by player: player_name (lower) -> [{ tournamentId, points, ... }]
+    // Build tournament results using flat scoring
     const resultsByPlayer = {};
     for (const r of tournamentResults || []) {
       const key = r.player_name.toLowerCase();
       if (!resultsByPlayer[key]) resultsByPlayer[key] = [];
 
-      // Calculate fantasy points using league scoring
       const holePoints =
         (r.eagles || 0) * scoring.eagle +
         (r.birdies || 0) * scoring.birdie +
@@ -584,43 +526,9 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
         (r.bogeys || 0) * scoring.bogey +
         (r.doubles_or_worse || 0) * scoring.double_bogey;
 
-      let statPoints = 0;
-      if (r.accuracy != null && r.field_avg_accuracy != null) {
-        statPoints += (r.accuracy - r.field_avg_accuracy) * (scoring.fir_multiplier || 0);
-      }
-      if (r.gir != null && r.field_avg_gir != null) {
-        statPoints += (r.gir - r.field_avg_gir) * (scoring.gir_multiplier || 0);
-      }
-      if (r.distance != null && r.field_avg_distance != null) {
-        statPoints += (r.distance - r.field_avg_distance) * (scoring.distance_multiplier || 0);
-      }
-      if (r.great_shots != null) {
-        statPoints += r.great_shots * (scoring.great_shot_bonus || 0);
-      }
-      if (r.poor_shots != null) {
-        statPoints += r.poor_shots * (scoring.poor_shot_penalty || 0);
-      }
-
+      const statResult = calcFlatStatPoints(r, scoring);
       const posResult = calcPositionPoints(r.position, scoring);
-      const totalPoints = +(holePoints + statPoints + posResult.position_points).toFixed(2);
-
-      // Individual stat point breakdowns
-      let firPts = 0, girPts = 0, distPts = 0, greatPts = 0, poorPts = 0;
-      if (r.accuracy != null && r.field_avg_accuracy != null) {
-        firPts = +((r.accuracy - r.field_avg_accuracy) * (scoring.fir_multiplier || 0)).toFixed(2);
-      }
-      if (r.gir != null && r.field_avg_gir != null) {
-        girPts = +((r.gir - r.field_avg_gir) * (scoring.gir_multiplier || 0)).toFixed(2);
-      }
-      if (r.distance != null && r.field_avg_distance != null) {
-        distPts = +((r.distance - r.field_avg_distance) * (scoring.distance_multiplier || 0)).toFixed(2);
-      }
-      if (r.great_shots != null) {
-        greatPts = +(r.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
-      }
-      if (r.poor_shots != null) {
-        poorPts = +(r.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
-      }
+      const totalPoints = +(holePoints + statResult.statPoints + posResult.position_points).toFixed(2);
 
       resultsByPlayer[key].push({
         tournamentId: r.tournament_id,
@@ -634,8 +542,12 @@ router.get('/:leagueId/all-players', auth, async (req, res) => {
         pars: r.pars || 0,
         bogeys: r.bogeys || 0,
         doubles: r.doubles_or_worse || 0,
-        statPoints: +statPoints.toFixed(2),
-        firPts, girPts, distPts, greatPts, poorPts,
+        statPoints: statResult.statPoints,
+        firPts: statResult.breakdown.fir?.pts || 0,
+        girPts: statResult.breakdown.gir?.pts || 0,
+        distPts: statResult.breakdown.distance?.pts || 0,
+        greatPts: statResult.breakdown.great_shots?.pts || 0,
+        poorPts: statResult.breakdown.poor_shots?.pts || 0,
         holesPlayed: r.holes_played || 0,
       });
     }

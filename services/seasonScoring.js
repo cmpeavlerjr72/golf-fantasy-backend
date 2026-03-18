@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase');
 
-// Default scoring config with stat bonuses
+// Default scoring config — flat points, easy to understand
 const DEFAULT_SCORING = {
   // Hole-by-hole points
   eagle: 5,
@@ -8,19 +8,18 @@ const DEFAULT_SCORING = {
   par: 0.5,
   bogey: -1,
   double_bogey: -3,
-  worse: -5,
-  // Stat multipliers (relative to field average) — calibrated for ~45% stat influence
-  fir_multiplier: 77,         // (player_fir - field_avg) * multiplier
-  gir_multiplier: 104,        // GIR matters more than FIR
-  distance_multiplier: 0.77,  // per yard above/below average
-  // Great/poor shot bonuses
-  great_shot_bonus: 3.91,     // per great shot
-  poor_shot_penalty: -3.91,   // per poor shot
+  // Flat stat points
+  fir_points: 20,          // pts × FIR% (e.g. 0.65 FIR = 13 pts)
+  gir_points: 25,          // pts × GIR% (e.g. 0.70 GIR = 17.5 pts)
+  dist_per_yard: 0.1,      // per yard of avg driving distance (310 yds = 31 pts)
+  // Shot quality bonuses (flat per shot)
+  great_shot_bonus: 2,
+  poor_shot_penalty: -2,
   // Position-based points (leaderboard finish)
   position_points: {
-    1: 30, 2: 20, 3: 15, 4: 12, 5: 10,
-    6: 8, 7: 7, 8: 6, 9: 5, 10: 4,
-    top15: 3, top20: 2, top30: 1, other: 0, cut: -5,
+    1: 10, 2: 7, 3: 5, 4: 4, 5: 3,
+    6: 2, 7: 1.5, 8: 1, 9: 0.5, 10: 0.5,
+    top15: 0, top20: 0, top30: 0, other: 0, cut: -5,
   },
 };
 
@@ -39,17 +38,14 @@ function calcPositionPoints(pos, scoring) {
   const parsed = parsePosition(pos);
   if (parsed === null) return { position_points: 0, position: pos || null };
   if (typeof parsed === 'string') {
-    // CUT, WD, DQ, MC
     return { position_points: ppConfig.cut || -5, position: pos };
   }
-  // Exact position match (1-10)
   if (ppConfig[parsed] !== undefined) {
     return { position_points: ppConfig[parsed], position: pos };
   }
-  // Range-based
-  if (parsed <= 15) return { position_points: ppConfig.top15 || 3, position: pos };
-  if (parsed <= 20) return { position_points: ppConfig.top20 || 2, position: pos };
-  if (parsed <= 30) return { position_points: ppConfig.top30 || 1, position: pos };
+  if (parsed <= 15) return { position_points: ppConfig.top15 || 0, position: pos };
+  if (parsed <= 20) return { position_points: ppConfig.top20 || 0, position: pos };
+  if (parsed <= 30) return { position_points: ppConfig.top30 || 0, position: pos };
   return { position_points: ppConfig.other || 0, position: pos };
 }
 
@@ -107,65 +103,48 @@ function calcHolePoints(holes, scoring) {
     else if (diff === -1) { points += scoring.birdie; birdies++; }
     else if (diff === 0) { points += scoring.par; pars++; }
     else if (diff === 1) { points += scoring.bogey; bogeys++; }
-    else if (diff === 2) { points += scoring.double_bogey; doubles++; }
-    else { points += scoring.worse; doubles++; }
+    else { points += scoring.double_bogey; doubles++; }
   }
 
   return { points, eagles, birdies, pars, bogeys, doubles_or_worse: doubles, holes_played: holesPlayed };
 }
 
-// Calculate stat bonus points for a single player relative to field averages
-async function calcStatBonus(tournamentId, playerName, scoring) {
-  const { data: playerStats } = await supabase
-    .from('tournament_stats')
-    .select('*')
-    .eq('tournament_id', tournamentId)
-    .ilike('player_name', playerName)
-    .maybeSingle();
-
-  const { data: fieldAvg } = await supabase
-    .from('tournament_field_averages')
-    .select('*')
-    .eq('tournament_id', tournamentId)
-    .maybeSingle();
-
-  if (!playerStats || !fieldAvg) return { statPoints: 0, breakdown: {} };
+// Calculate flat stat points for a single player (no field averages needed)
+function calcFlatStatPoints(playerStats, scoring) {
+  if (!playerStats) return { statPoints: 0, breakdown: {} };
 
   let statPoints = 0;
   const breakdown = {};
 
-  // FIR relative scoring
-  if (playerStats.accuracy != null && fieldAvg.avg_accuracy != null) {
-    const firDiff = playerStats.accuracy - fieldAvg.avg_accuracy;
-    const firPts = +(firDiff * (scoring.fir_multiplier || 0)).toFixed(2);
+  // Fairways hit: flat rate × FIR percentage
+  if (playerStats.accuracy != null) {
+    const firPts = +(playerStats.accuracy * (scoring.fir_points || 0)).toFixed(2);
     statPoints += firPts;
-    breakdown.fir = { value: playerStats.accuracy, avg: fieldAvg.avg_accuracy, pts: firPts };
+    breakdown.fir = { value: playerStats.accuracy, pts: firPts };
   }
 
-  // GIR relative scoring
-  if (playerStats.gir != null && fieldAvg.avg_gir != null) {
-    const girDiff = playerStats.gir - fieldAvg.avg_gir;
-    const girPts = +(girDiff * (scoring.gir_multiplier || 0)).toFixed(2);
+  // Greens in regulation: flat rate × GIR percentage
+  if (playerStats.gir != null) {
+    const girPts = +(playerStats.gir * (scoring.gir_points || 0)).toFixed(2);
     statPoints += girPts;
-    breakdown.gir = { value: playerStats.gir, avg: fieldAvg.avg_gir, pts: girPts };
+    breakdown.gir = { value: playerStats.gir, pts: girPts };
   }
 
-  // Driving distance relative scoring
-  if (playerStats.distance != null && fieldAvg.avg_distance != null) {
-    const distDiff = playerStats.distance - fieldAvg.avg_distance;
-    const distPts = +(distDiff * (scoring.distance_multiplier || 0)).toFixed(2);
+  // Driving distance: flat rate per yard
+  if (playerStats.distance != null) {
+    const distPts = +(playerStats.distance * (scoring.dist_per_yard || 0)).toFixed(2);
     statPoints += distPts;
-    breakdown.distance = { value: playerStats.distance, avg: fieldAvg.avg_distance, pts: distPts };
+    breakdown.distance = { value: playerStats.distance, pts: distPts };
   }
 
-  // Great shots bonus
+  // Great shots bonus (flat per shot)
   if (playerStats.great_shots != null) {
     const greatPts = +(playerStats.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
     statPoints += greatPts;
     breakdown.great_shots = { count: playerStats.great_shots, pts: greatPts };
   }
 
-  // Poor shots penalty
+  // Poor shots penalty (flat per shot)
   if (playerStats.poor_shots != null) {
     const poorPts = +(playerStats.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
     statPoints += poorPts;
@@ -179,15 +158,17 @@ async function calcStatBonus(tournamentId, playerName, scoring) {
 async function calculatePlayerPoints(tournamentId, playerName, scoringConfig) {
   const scoring = { ...DEFAULT_SCORING, ...scoringConfig };
 
-  const [{ data: holes }, { data: playerScore }] = await Promise.all([
+  const [{ data: holes }, { data: playerScore }, { data: playerStats }] = await Promise.all([
     supabase.from('hole_scores').select('score, par')
       .eq('tournament_id', tournamentId).ilike('player_name', playerName),
     supabase.from('player_scores').select('position')
       .eq('tournament_id', tournamentId).ilike('player_name', playerName).maybeSingle(),
+    supabase.from('tournament_stats').select('*')
+      .eq('tournament_id', tournamentId).ilike('player_name', playerName).maybeSingle(),
   ]);
 
   const holeResult = calcHolePoints(holes, scoring);
-  const statResult = await calcStatBonus(tournamentId, playerName, scoring);
+  const statResult = calcFlatStatPoints(playerStats, scoring);
   const posResult = calcPositionPoints(playerScore?.position, scoring);
 
   return {
@@ -246,7 +227,6 @@ async function calculateWeeklyPoints(leagueId, memberId, tournamentId, scoringCo
 
 // Process end-of-week: calculate all weekly points, assign positions, award season points
 async function processWeeklyResults(leagueId, tournamentId) {
-  // Snapshot raw player results (league-agnostic, idempotent)
   await snapshotTournamentResults(tournamentId);
 
   const { data: league } = await supabase
@@ -275,41 +255,25 @@ async function processWeeklyResults(leagueId, tournamentId) {
   const allZero = results.every(r => r.points === 0);
   if (allZero) {
     console.log(`[Scoring] Skipping tournament ${tournamentId} for league ${leagueId} — all teams scored 0`);
-    // Clean up any previously stored bad results for this week
-    await supabase
-      .from('weekly_results')
-      .delete()
-      .eq('league_id', leagueId)
-      .eq('tournament_id', tournamentId);
-    await supabase
-      .from('season_scores')
-      .delete()
-      .eq('league_id', leagueId)
-      .eq('tournament_id', tournamentId);
+    await supabase.from('weekly_results').delete().eq('league_id', leagueId).eq('tournament_id', tournamentId);
+    await supabase.from('season_scores').delete().eq('league_id', leagueId).eq('tournament_id', tournamentId);
     return [];
   }
 
   results.sort((a, b) => b.points - a.points);
 
-  // Assign positions and season points with tie handling:
-  // Tied teams share the same position (e.g. T2) and split the combined
-  // season points for the positions they span, like prize money in golf.
+  // Tie handling: split season points evenly like prize money in golf
   let i = 0;
   while (i < results.length) {
-    // Find the extent of the tie group starting at position i
     let j = i + 1;
-    while (j < results.length && results[j].points === results[i].points) {
-      j++;
-    }
+    while (j < results.length && results[j].points === results[i].points) j++;
     const tiedCount = j - i;
-    // Sum the season points for positions i through j-1 and divide evenly
     let totalSeasonPts = 0;
     for (let k = i; k < j; k++) {
       totalSeasonPts += seasonPointsDist[k] || seasonPointsDist[seasonPointsDist.length - 1] || 25;
     }
     const sharedPts = +(totalSeasonPts / tiedCount).toFixed(2);
-    const position = i + 1; // 1-indexed position
-
+    const position = i + 1;
     for (let k = i; k < j; k++) {
       results[k].position = position;
       results[k].seasonPoints = sharedPts;
@@ -330,7 +294,6 @@ async function processWeeklyResults(leagueId, tournamentId) {
         updated_at: new Date().toISOString(),
       }, { onConflict: 'league_id,tournament_id,member_id' });
 
-    // Per-player breakdown
     const { data: lineup } = await supabase
       .from('lineups')
       .select('player_name')
@@ -340,7 +303,7 @@ async function processWeeklyResults(leagueId, tournamentId) {
       .eq('slot', 'starter');
 
     for (const starter of lineup || []) {
-      const playerCalc = await calculatePlayerPoints(tournamentId, starter.player_name, scoringConfig);
+      const playerCalc = await calculatePlayerPoints(tournamentId, starter.player_name, league.scoring_config || {});
       await supabase
         .from('season_scores')
         .upsert({
@@ -363,12 +326,10 @@ async function processWeeklyResults(leagueId, tournamentId) {
   return results;
 }
 
-// Batch calculate points for multiple players in 3 total DB queries instead of 3 per player
+// Batch calculate points for multiple players in minimal DB queries
 async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConfig) {
   const scoring = { ...DEFAULT_SCORING, ...scoringConfig };
 
-  // Fetch ALL data for the tournament in parallel, match in memory (case-insensitive)
-  // hole_scores can exceed Supabase's 1000-row default limit, so paginate
   async function fetchAllHoles(tid) {
     let all = [];
     let from = 0;
@@ -385,10 +346,9 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
     return all;
   }
 
-  const [allHoles, { data: allStats }, { data: fieldAvg }, { data: allPositions }] = await Promise.all([
+  const [allHoles, { data: allStats }, { data: allPositions }] = await Promise.all([
     fetchAllHoles(tournamentId),
     supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
-    supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
     supabase.from('player_scores').select('player_name, position').eq('tournament_id', tournamentId),
   ]);
 
@@ -410,58 +370,19 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
     positionByPlayer[p.player_name.toLowerCase()] = p.position;
   }
 
-  // Calculate for each player in memory
   const results = {};
   for (const name of playerNames) {
     const key = name.toLowerCase();
     const holes = holesByPlayer[key] || [];
     const holeResult = calcHolePoints(holes, scoring);
-
-    // Stat bonus calculation inline
-    let statPoints = 0;
-    const breakdown = {};
-    const ps = statsByPlayer[key];
-
-    if (ps && fieldAvg) {
-      if (ps.accuracy != null && fieldAvg.avg_accuracy != null) {
-        const firDiff = ps.accuracy - fieldAvg.avg_accuracy;
-        const firPts = +(firDiff * (scoring.fir_multiplier || 0)).toFixed(2);
-        statPoints += firPts;
-        breakdown.fir = { value: ps.accuracy, avg: fieldAvg.avg_accuracy, pts: firPts };
-      }
-      if (ps.gir != null && fieldAvg.avg_gir != null) {
-        const girDiff = ps.gir - fieldAvg.avg_gir;
-        const girPts = +(girDiff * (scoring.gir_multiplier || 0)).toFixed(2);
-        statPoints += girPts;
-        breakdown.gir = { value: ps.gir, avg: fieldAvg.avg_gir, pts: girPts };
-      }
-      if (ps.distance != null && fieldAvg.avg_distance != null) {
-        const distDiff = ps.distance - fieldAvg.avg_distance;
-        const distPts = +(distDiff * (scoring.distance_multiplier || 0)).toFixed(2);
-        statPoints += distPts;
-        breakdown.distance = { value: ps.distance, avg: fieldAvg.avg_distance, pts: distPts };
-      }
-      if (ps.great_shots != null) {
-        const greatPts = +(ps.great_shots * (scoring.great_shot_bonus || 0)).toFixed(2);
-        statPoints += greatPts;
-        breakdown.great_shots = { count: ps.great_shots, pts: greatPts };
-      }
-      if (ps.poor_shots != null) {
-        const poorPts = +(ps.poor_shots * (scoring.poor_shot_penalty || 0)).toFixed(2);
-        statPoints += poorPts;
-        breakdown.poor_shots = { count: ps.poor_shots, pts: poorPts };
-      }
-    }
-
-    statPoints = +statPoints.toFixed(2);
-
+    const statResult = calcFlatStatPoints(statsByPlayer[key], scoring);
     const posResult = calcPositionPoints(positionByPlayer[key], scoring);
 
     results[name] = {
-      points: +(holeResult.points + statPoints + posResult.position_points).toFixed(2),
+      points: +(holeResult.points + statResult.statPoints + posResult.position_points).toFixed(2),
       hole_points: holeResult.points,
-      stat_points: statPoints,
-      stat_breakdown: breakdown,
+      stat_points: statResult.statPoints,
+      stat_breakdown: statResult.breakdown,
       position_points: posResult.position_points,
       position: posResult.position,
       eagles: holeResult.eagles,
@@ -476,10 +397,8 @@ async function calculatePlayerPointsBatch(tournamentId, playerNames, scoringConf
   return results;
 }
 
-// Snapshot all player results for a tournament into the master player_tournament_results table
-// This is league-agnostic — stores raw hole counts + raw stat values + field averages
+// Snapshot all player results for a tournament into player_tournament_results
 async function snapshotTournamentResults(tournamentId) {
-  // Fetch all hole scores (paginated)
   let allHoles = [];
   let from = 0;
   const PAGE = 1000;
@@ -493,20 +412,15 @@ async function snapshotTournamentResults(tournamentId) {
     from += PAGE;
   }
 
-  // Fetch stats, field averages, and positions
   const [{ data: allStats }, { data: fieldAvg }, { data: allPositions }] = await Promise.all([
     supabase.from('tournament_stats').select('*').eq('tournament_id', tournamentId),
     supabase.from('tournament_field_averages').select('*').eq('tournament_id', tournamentId).maybeSingle(),
     supabase.from('player_scores').select('player_name, position').eq('tournament_id', tournamentId),
   ]);
 
-  // Build position lookup
   const positionMap = {};
-  for (const p of allPositions || []) {
-    positionMap[p.player_name] = p.position;
-  }
+  for (const p of allPositions || []) positionMap[p.player_name] = p.position;
 
-  // Build hole counts per player
   const playerHoles = {};
   for (const h of allHoles) {
     const key = h.player_name;
@@ -521,34 +435,22 @@ async function snapshotTournamentResults(tournamentId) {
     else playerHoles[key].doubles_or_worse++;
   }
 
-  // Build stats lookup
   const statsMap = {};
-  for (const s of allStats || []) {
-    statsMap[s.player_name] = s;
-  }
+  for (const s of allStats || []) statsMap[s.player_name] = s;
 
-  // Get all unique player names from holes and stats
   const allPlayers = new Set([...Object.keys(playerHoles), ...Object.keys(statsMap)]);
 
   const rows = [];
   for (const name of allPlayers) {
     const holes = playerHoles[name] || { eagles: 0, birdies: 0, pars: 0, bogeys: 0, doubles_or_worse: 0, holes_played: 0 };
     const stats = statsMap[name] || {};
-
     rows.push({
       tournament_id: tournamentId,
       player_name: name,
-      eagles: holes.eagles,
-      birdies: holes.birdies,
-      pars: holes.pars,
-      bogeys: holes.bogeys,
-      doubles_or_worse: holes.doubles_or_worse,
-      holes_played: holes.holes_played,
-      accuracy: stats.accuracy || null,
-      gir: stats.gir || null,
-      distance: stats.distance || null,
-      great_shots: stats.great_shots || null,
-      poor_shots: stats.poor_shots || null,
+      eagles: holes.eagles, birdies: holes.birdies, pars: holes.pars,
+      bogeys: holes.bogeys, doubles_or_worse: holes.doubles_or_worse, holes_played: holes.holes_played,
+      accuracy: stats.accuracy || null, gir: stats.gir || null, distance: stats.distance || null,
+      great_shots: stats.great_shots || null, poor_shots: stats.poor_shots || null,
       field_avg_accuracy: fieldAvg?.avg_accuracy || null,
       field_avg_gir: fieldAvg?.avg_gir || null,
       field_avg_distance: fieldAvg?.avg_distance || null,
@@ -557,12 +459,9 @@ async function snapshotTournamentResults(tournamentId) {
     });
   }
 
-  // Upsert in batches
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    await supabase.from('player_tournament_results').upsert(batch, {
-      onConflict: 'tournament_id,player_name',
-    });
+    await supabase.from('player_tournament_results').upsert(batch, { onConflict: 'tournament_id,player_name' });
   }
 
   console.log(`[Snapshot] Saved ${rows.length} player results for tournament ${tournamentId}`);
@@ -580,4 +479,5 @@ module.exports = {
   snapshotTournamentResults,
   parsePosition,
   calcPositionPoints,
+  calcFlatStatPoints,
 };

@@ -48,6 +48,22 @@ async function getLockedPlayers(tournamentId) {
   return locked;
 }
 
+// Get the set of players in the active tournament field (from tee_times)
+async function getFieldPlayers(tournamentId) {
+  if (!tournamentId) return new Set();
+  const { data: teeTimes } = await supabase
+    .from('tee_times')
+    .select('player_name')
+    .eq('tournament_id', tournamentId)
+    .eq('round_num', 1);
+
+  const field = new Set();
+  for (const tt of teeTimes || []) {
+    field.add(tt.player_name.toLowerCase());
+  }
+  return field;
+}
+
 // GET /api/rosters/:leagueId — Get my current roster
 router.get('/:leagueId', auth, async (req, res) => {
   try {
@@ -67,8 +83,11 @@ router.get('/:leagueId', auth, async (req, res) => {
       .eq('is_active', true)
       .maybeSingle();
 
-    // Batch lock check instead of per-player query
-    const lockedSet = await getLockedPlayers(tournament?.id);
+    // Batch lock + field check
+    const [lockedSet, fieldSet] = await Promise.all([
+      getLockedPlayers(tournament?.id),
+      getFieldPlayers(tournament?.id),
+    ]);
 
     const players = (roster || []).map(r => ({
       playerName: r.player_name,
@@ -76,6 +95,7 @@ router.get('/:leagueId', auth, async (req, res) => {
       acquiredVia: r.acquired_via,
       acquiredAt: r.acquired_at,
       locked: lockedSet.has(r.player_name.toLowerCase()),
+      inField: fieldSet.has(r.player_name.toLowerCase()),
     }));
 
     res.json({ roster: players, rosterSize: ctx.league.roster_size });
@@ -112,7 +132,10 @@ router.get('/:leagueId/free-agents', auth, async (req, res) => {
       .eq('is_active', true)
       .maybeSingle();
 
-    const lockedSet = await getLockedPlayers(tournament?.id);
+    const [lockedSet, fieldSet] = await Promise.all([
+      getLockedPlayers(tournament?.id),
+      getFieldPlayers(tournament?.id),
+    ]);
 
     const freeAgents = [];
     for (const p of allPlayers || []) {
@@ -123,6 +146,7 @@ router.get('/:leagueId/free-agents', auth, async (req, res) => {
         dgRank: p.dg_rank,
         sgTotal: parseFloat(p.sg_total),
         locked: lockedSet.has(p.player_name.toLowerCase()),
+        inField: fieldSet.has(p.player_name.toLowerCase()),
       });
     }
 
