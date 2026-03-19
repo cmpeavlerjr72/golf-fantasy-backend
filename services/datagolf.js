@@ -3,6 +3,13 @@ const supabase = require('../config/supabase');
 const DG_BASE = 'https://feeds.datagolf.com';
 const DG_KEY = process.env.DATAGOLF_API_KEY;
 
+// Fuzzy-match tournament names — DG may use slightly different casing/formatting
+// (e.g. "THE PLAYERS Championship" vs "The Players Championship")
+function namesMatch(a, b) {
+  const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalize(a) === normalize(b);
+}
+
 async function dgFetch(path) {
   const sep = path.includes('?') ? '&' : '?';
   const url = `${DG_BASE}${path}${sep}file_format=json&key=${DG_KEY}`;
@@ -147,7 +154,33 @@ async function syncPlayerStats() {
 
 // Sync live scores from in-play predictions
 async function syncLiveScores(tournamentId) {
+  // Look up the expected tournament name so we can verify the DG response matches
+  const { data: tourney } = await supabase
+    .from('tournaments')
+    .select('name')
+    .eq('id', tournamentId)
+    .single();
+
   const live = await dgFetch('/preds/in-play');
+
+  // Guard: if DG's in-play data is for a different tournament (e.g. still showing
+  // last week's results), skip the sync to avoid tagging stale scores with the
+  // wrong tournament ID.  Also clear any contaminated scores from prior syncs
+  // that ran before this guard existed.
+  if (tourney?.name && live.event_name && !namesMatch(tourney.name, live.event_name)) {
+    console.log(`[Sync] Skipping live scores — DG in-play is for "${live.event_name}" but active tournament is "${tourney.name}"`);
+    // Clear any stale scores that were previously written under this tournament ID
+    const { data: stale } = await supabase
+      .from('player_scores')
+      .select('id')
+      .eq('tournament_id', tournamentId)
+      .limit(1);
+    if (stale && stale.length > 0) {
+      console.log(`[Sync] Clearing stale player_scores for tournament ${tournamentId}`);
+      await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
+    }
+    return 0;
+  }
 
   const rows = (live.data || []).map((p, i) => ({
     tournament_id: tournamentId,
@@ -177,7 +210,28 @@ async function syncLiveScores(tournamentId) {
 
 // Sync hole-by-hole scores from live-hole-scores endpoint
 async function syncHoleScores(tournamentId) {
+  const { data: tourney } = await supabase
+    .from('tournaments')
+    .select('name')
+    .eq('id', tournamentId)
+    .single();
+
   const data = await dgFetch('/preds/live-hole-scores?tour=pga');
+
+  // Guard: skip if DG is still serving data for last week's tournament
+  if (tourney?.name && data.event_name && !namesMatch(tourney.name, data.event_name)) {
+    console.log(`[Sync] Skipping hole scores — DG is for "${data.event_name}" but active tournament is "${tourney.name}"`);
+    const { data: stale } = await supabase
+      .from('hole_scores')
+      .select('id')
+      .eq('tournament_id', tournamentId)
+      .limit(1);
+    if (stale && stale.length > 0) {
+      console.log(`[Sync] Clearing stale hole_scores for tournament ${tournamentId}`);
+      await supabase.from('hole_scores').delete().eq('tournament_id', tournamentId);
+    }
+    return 0;
+  }
 
   const rows = [];
   for (const player of data.players || []) {
@@ -211,9 +265,33 @@ async function syncHoleScores(tournamentId) {
 
 // Sync live tournament stats (FIR, GIR, distance, great/poor shots, etc.)
 async function syncTournamentStats(tournamentId) {
+  const { data: tourney } = await supabase
+    .from('tournaments')
+    .select('name')
+    .eq('id', tournamentId)
+    .single();
+
   const stats = await dgFetch(
     '/preds/live-tournament-stats?stats=accuracy,gir,distance,great_shots,poor_shots,sg_putt,sg_arg,sg_app,sg_ott,sg_total&round=event_avg'
   );
+
+  // Guard: skip if DG is still serving stats for last week's tournament
+  if (tourney?.name && stats.event_name && !namesMatch(tourney.name, stats.event_name)) {
+    console.log(`[Sync] Skipping tournament stats — DG is for "${stats.event_name}" but active tournament is "${tourney.name}"`);
+    const { data: stale } = await supabase
+      .from('tournament_stats')
+      .select('id')
+      .eq('tournament_id', tournamentId)
+      .limit(1);
+    if (stale && stale.length > 0) {
+      console.log(`[Sync] Clearing stale tournament_stats for tournament ${tournamentId}`);
+      await Promise.all([
+        supabase.from('tournament_stats').delete().eq('tournament_id', tournamentId),
+        supabase.from('tournament_field_averages').delete().eq('tournament_id', tournamentId),
+      ]);
+    }
+    return 0;
+  }
 
   // DG returns { live_stats: [ ... ] }
   const players = stats.live_stats;
