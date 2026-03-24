@@ -55,7 +55,7 @@ router.delete('/unregister', auth, async (req, res) => {
 router.get('/version', (req, res) => {
   res.json({
     minVersion: '1.2.0',
-    latestVersion: '1.2.0',
+    latestVersion: '1.3.0',
     forceUpdate: false,
     storeUrls: {
       ios: 'https://apps.apple.com/us/app/fairway-fantasy/id6760315596',
