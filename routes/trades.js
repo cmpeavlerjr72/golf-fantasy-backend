@@ -2,6 +2,7 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const auth = require('../middleware/auth');
 const { isPlayerLocked } = require('../services/seasonScoring');
+const { notifyTradeProposed, notifyTradeAccepted, notifyTradeDeclined } = require('../services/notifications');
 
 const router = express.Router();
 
@@ -82,6 +83,29 @@ router.post('/:leagueId', auth, async (req, res) => {
 
     if (error) throw error;
 
+    // Notify the target user about the trade proposal
+    const { data: targetMember } = await supabase
+      .from('league_members')
+      .select('user_id, team_name')
+      .eq('id', myMember.id)
+      .maybeSingle();
+
+    const { data: targetUser } = await supabase
+      .from('league_members')
+      .select('user_id')
+      .eq('id', theirMemberId)
+      .maybeSingle();
+
+    if (targetUser) {
+      notifyTradeProposed(
+        league.id,
+        targetUser.user_id,
+        targetMember?.team_name || 'Someone',
+        myPlayer,
+        theirPlayer
+      ).catch(err => console.error('Trade propose notification error:', err.message));
+    }
+
     res.status(201).json({ id: proposal.id, message: 'Trade proposed' });
   } catch (err) {
     console.error('Propose trade error:', err);
@@ -145,7 +169,7 @@ router.post('/:leagueId/:tradeId/accept', auth, async (req, res) => {
     // Verify the accepting user is the target
     const { data: member } = await supabase
       .from('league_members')
-      .select('id')
+      .select('id, team_name')
       .eq('id', trade.target_id)
       .eq('user_id', req.user.id)
       .maybeSingle();
@@ -194,6 +218,18 @@ router.post('/:leagueId/:tradeId/accept', auth, async (req, res) => {
       { league_id: trade.league_id, member_id: trade.target_id, type: 'trade', player_name: `Sent ${trade.target_player}, received ${trade.proposer_player}` },
     ]);
 
+    // Notify the proposer their trade was accepted
+    const { data: proposerMember } = await supabase
+      .from('league_members')
+      .select('user_id')
+      .eq('id', trade.proposer_id)
+      .maybeSingle();
+
+    if (proposerMember) {
+      notifyTradeAccepted(trade.league_id, proposerMember.user_id, member.team_name || 'Your trade partner')
+        .catch(err => console.error('Trade accept notification error:', err.message));
+    }
+
     res.json({ message: 'Trade accepted' });
   } catch (err) {
     console.error('Accept trade error:', err);
@@ -216,7 +252,7 @@ router.post('/:leagueId/:tradeId/decline', auth, async (req, res) => {
 
     const { data: member } = await supabase
       .from('league_members')
-      .select('id')
+      .select('id, team_name')
       .eq('id', trade.target_id)
       .eq('user_id', req.user.id)
       .maybeSingle();
@@ -227,6 +263,18 @@ router.post('/:leagueId/:tradeId/decline', auth, async (req, res) => {
       .from('trade_proposals')
       .update({ status: 'declined', resolved_at: new Date().toISOString() })
       .eq('id', trade.id);
+
+    // Notify the proposer their trade was declined
+    const { data: proposerMember } = await supabase
+      .from('league_members')
+      .select('user_id')
+      .eq('id', trade.proposer_id)
+      .maybeSingle();
+
+    if (proposerMember) {
+      notifyTradeDeclined(trade.league_id, proposerMember.user_id, member.team_name || 'Your trade partner')
+        .catch(err => console.error('Trade decline notification error:', err.message));
+    }
 
     res.json({ message: 'Trade declined' });
   } catch (err) {

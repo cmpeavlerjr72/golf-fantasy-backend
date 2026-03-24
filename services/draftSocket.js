@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const jwt = require('jsonwebtoken');
+const { notifyDraftStarted, notifyDraftTurn } = require('./notifications');
 
 const MAX_CONNECTIONS_PER_USER = 5;
 const PICK_COOLDOWN_MS = 1000; // 1 sec between picks
@@ -92,6 +93,19 @@ function setupDraftSocket(io) {
 
         const state = await getDraftState(leagueId);
         io.to(`draft-${leagueId}`).emit('draft-state', state);
+
+        // Send push notification to all league members
+        notifyDraftStarted(leagueId, league.name).catch(err =>
+          console.error('Draft start notification error:', err.message)
+        );
+
+        // Notify the first picker it's their turn
+        if (state.currentMemberId) {
+          const firstPicker = state.members.find(m => m.id === state.currentMemberId);
+          if (firstPicker) {
+            notifyDraftTurn(leagueId, firstPicker.userId, league.name).catch(() => {});
+          }
+        }
       } catch (err) {
         console.error('Start draft error:', err);
       }
@@ -199,6 +213,14 @@ function setupDraftSocket(io) {
 
         const state = await getDraftState(leagueId);
         io.to(`draft-${leagueId}`).emit('draft-state', state);
+
+        // Notify next picker it's their turn
+        if (state.status === 'drafting' && state.currentMemberId) {
+          const nextPicker = state.members.find(m => m.id === state.currentMemberId);
+          if (nextPicker && nextPicker.userId !== socket.user.id) {
+            notifyDraftTurn(leagueId, nextPicker.userId, league.name).catch(() => {});
+          }
+        }
       } catch (err) {
         console.error('Draft pick error:', err);
       }

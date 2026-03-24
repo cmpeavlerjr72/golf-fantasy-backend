@@ -43,12 +43,25 @@ router.get('/:leagueId', auth, async (req, res) => {
       .eq('league_id', req.params.leagueId)
       .eq('member_id', member.id);
 
+    // Get tournament field to show in-field status
+    const { data: teeTimes } = await supabase
+      .from('tee_times')
+      .select('player_name')
+      .eq('tournament_id', tournament.id)
+      .eq('round_num', 1);
+
+    const fieldSet = new Set();
+    for (const tt of teeTimes || []) {
+      fieldSet.add(tt.player_name.toLowerCase());
+    }
+
     res.json({
       tournament,
       lineup: (lineup || []).map(l => ({
         playerName: l.player_name,
         slot: l.slot,
         locked: l.locked,
+        inField: fieldSet.has(l.player_name.toLowerCase()),
       })),
       roster: (rosterData || []).map(r => r.player_name),
     });

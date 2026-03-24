@@ -13,6 +13,7 @@ const syncRoutes = require('./routes/sync');
 const lineupRoutes = require('./routes/lineups');
 const rosterRoutes = require('./routes/rosters');
 const tradeRoutes = require('./routes/trades');
+const pushRoutes = require('./routes/push');
 const setupDraftSocket = require('./services/draftSocket');
 const scheduler = require('./services/scheduler');
 
@@ -86,6 +87,7 @@ app.use('/api/sync', syncRoutes);
 app.use('/api/lineups', lineupRoutes);
 app.use('/api/rosters', rosterRoutes);
 app.use('/api/trades', tradeRoutes);
+app.use('/api/push', pushRoutes);
 
 // --- WebSocket ---
 setupDraftSocket(io);

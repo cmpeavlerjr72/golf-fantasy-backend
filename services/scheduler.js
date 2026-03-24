@@ -1,11 +1,13 @@
 const { syncAll, syncTournament, syncPlayerStats, syncLiveScores, syncHoleScores, syncTeeTimes, syncTournamentStats } = require('./datagolf');
 const { processWeeklyResults } = require('./seasonScoring');
+const { sendLineupReminders, sendFinalizationNotifications } = require('./notifications');
 const supabase = require('../config/supabase');
 
 const FIVE_MINUTES = 5 * 60 * 1000;
 const ONE_HOUR = 60 * 60 * 1000;
 
 let intervalId = null;
+let notificationIntervalId = null;
 
 function isTournamentDay() {
   const now = new Date();
@@ -115,6 +117,27 @@ async function tick() {
   }
 }
 
+// Check if it's time to send scheduled notifications
+// Lineup reminder: Wednesday 6pm ET (22:00 UTC during EDT, 23:00 UTC during EST)
+// Finalization: Monday 8am ET (12:00 UTC during EDT, 13:00 UTC during EST)
+async function checkScheduledNotifications() {
+  const now = new Date();
+  const utcDay = now.getUTCDay(); // 0=Sun, 1=Mon, 3=Wed
+  const utcHour = now.getUTCHours();
+
+  // Wednesday 6pm ET = UTC 22:00 (EDT) or 23:00 (EST)
+  if (utcDay === 3 && (utcHour === 22 || utcHour === 23)) {
+    console.log('[Scheduler] Sending lineup reminders (Wednesday 6pm ET)...');
+    await sendLineupReminders();
+  }
+
+  // Monday 8am ET = UTC 12:00 (EDT) or 13:00 (EST)
+  if (utcDay === 1 && (utcHour === 12 || utcHour === 13)) {
+    console.log('[Scheduler] Sending finalization notifications (Monday 8am ET)...');
+    await sendFinalizationNotifications();
+  }
+}
+
 function start() {
   // Run a full sync on server boot, then check for any missed finalizations
   console.log('[Scheduler] Running initial full sync...');
@@ -142,6 +165,16 @@ function start() {
   }
 
   scheduleNext();
+
+  // Check for scheduled notifications every 30 minutes
+  notificationIntervalId = setInterval(async () => {
+    try {
+      await checkScheduledNotifications();
+    } catch (err) {
+      console.error('[Scheduler] Notification check error:', err.message);
+    }
+  }, 30 * 60 * 1000);
+
   console.log('[Scheduler] Auto-sync scheduler started');
 }
 
@@ -149,8 +182,12 @@ function stop() {
   if (intervalId) {
     clearTimeout(intervalId);
     intervalId = null;
-    console.log('[Scheduler] Scheduler stopped');
   }
+  if (notificationIntervalId) {
+    clearInterval(notificationIntervalId);
+    notificationIntervalId = null;
+  }
+  console.log('[Scheduler] Scheduler stopped');
 }
 
 module.exports = { start, stop };
