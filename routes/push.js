@@ -51,6 +51,54 @@ router.delete('/unregister', auth, async (req, res) => {
   }
 });
 
+// POST /api/push/test — Send a test notification to the current user (debug)
+router.post('/test', auth, async (req, res) => {
+  try {
+    // Check if user has any push tokens
+    const { data: tokens, error } = await supabase
+      .from('push_tokens')
+      .select('token, platform, created_at')
+      .eq('user_id', req.user.id);
+
+    if (error) {
+      return res.status(500).json({ error: 'DB error', details: error.message });
+    }
+
+    if (!tokens || tokens.length === 0) {
+      return res.json({
+        success: false,
+        reason: 'No push tokens registered for your account. The app may not have registered a token on login.',
+        userId: req.user.id,
+        tokens: [],
+      });
+    }
+
+    // Try sending a test notification
+    const { sendToUsers } = require('../services/notifications');
+    await sendToUsers(
+      [req.user.id],
+      'Test Notification',
+      'Push notifications are working!',
+      { type: 'test' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Test notification sent. Check your device.',
+      userId: req.user.id,
+      tokenCount: tokens.length,
+      tokens: tokens.map(t => ({
+        tokenPrefix: t.token.substring(0, 25) + '...',
+        platform: t.platform,
+        createdAt: t.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error('Push test error:', err);
+    res.status(500).json({ error: 'Failed to send test', details: err.message });
+  }
+});
+
 // GET /api/push/version — App version check
 router.get('/version', (req, res) => {
   res.json({

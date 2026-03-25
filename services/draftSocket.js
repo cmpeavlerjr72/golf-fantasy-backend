@@ -95,6 +95,7 @@ function setupDraftSocket(io) {
         io.to(`draft-${leagueId}`).emit('draft-state', state);
 
         // Send push notification to all league members
+        console.log(`[Draft] Sending draft started notification for league ${leagueId} (${league.name})`);
         notifyDraftStarted(leagueId, league.name).catch(err =>
           console.error('Draft start notification error:', err.message)
         );
@@ -103,7 +104,10 @@ function setupDraftSocket(io) {
         if (state.currentMemberId) {
           const firstPicker = state.members.find(m => m.id === state.currentMemberId);
           if (firstPicker) {
-            notifyDraftTurn(leagueId, firstPicker.userId, league.name).catch(() => {});
+            console.log(`[Draft] Notifying first picker userId=${firstPicker.userId} for league ${leagueId}`);
+            notifyDraftTurn(leagueId, firstPicker.userId, league.name).catch(err =>
+              console.error('Draft turn notification error:', err.message)
+            );
           }
         }
       } catch (err) {
@@ -218,7 +222,10 @@ function setupDraftSocket(io) {
         if (state.status === 'drafting' && state.currentMemberId) {
           const nextPicker = state.members.find(m => m.id === state.currentMemberId);
           if (nextPicker && nextPicker.userId !== socket.user.id) {
-            notifyDraftTurn(leagueId, nextPicker.userId, league.name).catch(() => {});
+            console.log(`[Draft] Notifying next picker userId=${nextPicker.userId} for league ${leagueId}`);
+            notifyDraftTurn(leagueId, nextPicker.userId, league.name).catch(err =>
+              console.error('Draft turn notification error:', err.message)
+            );
           }
         }
       } catch (err) {

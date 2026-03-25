@@ -1,7 +1,9 @@
 const { Expo } = require('expo-server-sdk');
 const supabase = require('../config/supabase');
 
-const expo = new Expo();
+const expo = new Expo({
+  accessToken: process.env.EXPO_ACCESS_TOKEN || undefined,
+});
 
 /**
  * Send push notifications to specific users
@@ -11,14 +13,29 @@ const expo = new Expo();
  * @param {object} data - Optional extra data payload
  */
 async function sendToUsers(userIds, title, body, data = {}) {
-  if (!userIds || userIds.length === 0) return;
+  if (!userIds || userIds.length === 0) {
+    console.log('[Notifications] sendToUsers called with no userIds');
+    return;
+  }
 
-  const { data: tokens } = await supabase
+  console.log(`[Notifications] Sending "${title}" to userIds: ${userIds.join(', ')}`);
+
+  const { data: tokens, error: tokenError } = await supabase
     .from('push_tokens')
-    .select('token')
+    .select('token, user_id')
     .in('user_id', userIds);
 
-  if (!tokens || tokens.length === 0) return;
+  if (tokenError) {
+    console.error('[Notifications] Error querying push_tokens:', tokenError.message);
+    return;
+  }
+
+  if (!tokens || tokens.length === 0) {
+    console.warn(`[Notifications] No push tokens found for userIds: ${userIds.join(', ')}`);
+    return;
+  }
+
+  console.log(`[Notifications] Found ${tokens.length} push token(s)`);
 
   const messages = [];
   for (const { token } of tokens) {
@@ -32,20 +49,29 @@ async function sendToUsers(userIds, title, body, data = {}) {
       title,
       body,
       data,
+      channelId: 'default',
     });
   }
 
-  if (messages.length === 0) return;
+  if (messages.length === 0) {
+    console.warn('[Notifications] No valid tokens to send to');
+    return;
+  }
 
   // Chunk and send
   const chunks = expo.chunkPushNotifications(messages);
   for (const chunk of chunks) {
     try {
       const receipts = await expo.sendPushNotificationsAsync(chunk);
+      console.log(`[Notifications] Send result:`, JSON.stringify(receipts));
       // Clean up invalid tokens
       for (let i = 0; i < receipts.length; i++) {
-        if (receipts[i].status === 'error' && receipts[i].details?.error === 'DeviceNotRegistered') {
-          await supabase.from('push_tokens').delete().eq('token', chunk[i].to);
+        if (receipts[i].status === 'error') {
+          console.error(`[Notifications] Receipt error for ${chunk[i].to}:`, receipts[i].message, receipts[i].details);
+          if (receipts[i].details?.error === 'DeviceNotRegistered') {
+            await supabase.from('push_tokens').delete().eq('token', chunk[i].to);
+            console.log(`[Notifications] Removed invalid token: ${chunk[i].to}`);
+          }
         }
       }
     } catch (err) {
