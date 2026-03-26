@@ -295,10 +295,19 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
   try {
     const { calculatePlayerPointsBatch } = require('../services/seasonScoring');
 
-    // Cache per league for 30 seconds (scores update every 5 min from sync)
+    // Cache scoring data per league for 30 seconds (scores update every 5 min from sync)
+    // NOTE: isMe is per-user, so we cache the scoring data WITHOUT isMe and apply it per-request
     const cacheKey = `weekly-scores:${req.params.leagueId}`;
     const cached = cache.get(cacheKey);
-    if (cached) return res.json(cached);
+
+    if (cached) {
+      // Stamp isMe per-request from cached data
+      const teams = cached.teams.map(t => ({
+        ...t,
+        isMe: t._userId === req.user.id,
+      }));
+      return res.json({ tournament: cached.tournament, teams });
+    }
 
     const [{ data: league }, { data: tournament }] = await Promise.all([
       supabase.from('leagues').select('*').eq('id', req.params.leagueId).maybeSingle(),
@@ -352,6 +361,7 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
         memberId: member.id,
         teamName: member.team_name,
         displayName: member.users?.display_name,
+        _userId: member.user_id,
         isMe: member.user_id === req.user.id,
         totalPoints: +teamPoints.toFixed(2),
         holePoints: +teamHolePoints.toFixed(2),
@@ -364,7 +374,9 @@ router.get('/:leagueId/weekly-scores', auth, async (req, res) => {
     teams.sort((a, b) => b.totalPoints - a.totalPoints);
     const result = { tournament, teams };
     cache.set(cacheKey, result, 30_000); // 30 sec cache
-    res.json(result);
+    // Return with correct isMe for THIS user (cache has _userId for re-stamping)
+    const responseTeams = teams.map(t => ({ ...t, isMe: t._userId === req.user.id }));
+    res.json({ tournament, teams: responseTeams });
   } catch (err) {
     console.error('Weekly scores error:', err);
     res.status(500).json({ error: 'Server error' });
