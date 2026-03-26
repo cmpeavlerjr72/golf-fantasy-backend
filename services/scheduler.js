@@ -89,12 +89,28 @@ async function tick() {
         .single();
 
       if (tourney?.status === 'in_progress') {
-        const [scoreCount, holeCount, statCount] = await Promise.all([
-          syncLiveScores(tournamentId),
-          syncHoleScores(tournamentId),
-          syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
-        ]);
-        console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
+        // Double-check: has the first tee time actually passed?
+        const { data: earliestTee } = await supabase
+          .from('tee_times')
+          .select('tee_time')
+          .eq('tournament_id', tournamentId)
+          .eq('round_num', 1)
+          .order('tee_time', { ascending: true })
+          .limit(1);
+
+        const firstTeeTime = earliestTee?.[0]?.tee_time ? new Date(earliestTee[0].tee_time) : null;
+        const teeTimePassed = !firstTeeTime || new Date() >= firstTeeTime;
+
+        if (teeTimePassed) {
+          const [scoreCount, holeCount, statCount] = await Promise.all([
+            syncLiveScores(tournamentId),
+            syncHoleScores(tournamentId),
+            syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
+          ]);
+          console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
+        } else {
+          console.log(`[Scheduler] Tournament in_progress but first tee time (${earliestTee[0].tee_time}) hasn't passed — skipping live scores`);
+        }
       } else {
         console.log(`[Scheduler] Tournament not started yet — skipping live score sync`);
       }

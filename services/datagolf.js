@@ -412,9 +412,29 @@ async function syncAll() {
   const { tournamentId, eventName, field } = await syncTournament();
   const statsCount = await syncPlayerStats();
 
-  // Check if tournament has started — skip live scoring sync if not
+  // Check if tournament has ACTUALLY started — not just start_date, but whether
+  // any round-1 tee time has passed. This prevents syncing stale DG in-play data
+  // on the morning of a tournament before anyone has teed off.
   const { data: tourney } = await supabase.from('tournaments').select('status').eq('id', tournamentId).single();
-  const isLive = tourney?.status === 'in_progress';
+  let isLive = tourney?.status === 'in_progress';
+
+  if (isLive) {
+    const { data: earliestTee } = await supabase
+      .from('tee_times')
+      .select('tee_time')
+      .eq('tournament_id', tournamentId)
+      .eq('round_num', 1)
+      .order('tee_time', { ascending: true })
+      .limit(1);
+
+    if (earliestTee && earliestTee.length > 0) {
+      const firstTeeTime = new Date(earliestTee[0].tee_time);
+      if (new Date() < firstTeeTime) {
+        console.log(`[Sync] Tournament "${eventName}" marked in_progress but first tee time is ${earliestTee[0].tee_time} — skipping live scores`);
+        isLive = false;
+      }
+    }
+  }
 
   let scoresCount = 0, holeCount = 0, teeTimeCount = 0, tournStatCount = 0;
 
