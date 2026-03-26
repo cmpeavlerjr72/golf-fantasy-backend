@@ -22,13 +22,17 @@ async function dgFetch(path) {
 async function syncTournament() {
   const field = await dgFetch('/field-updates?tour=pga');
 
-  // Upsert tournament
-  const { data: existing } = await supabase
+  // Upsert tournament — use .limit(1) instead of .maybeSingle() to handle
+  // any pre-existing duplicates gracefully (maybeSingle errors on >1 row,
+  // which would cascade into creating even more duplicates)
+  const { data: existingRows } = await supabase
     .from('tournaments')
     .select('id')
     .eq('name', field.event_name)
     .eq('year', new Date(field.date_start).getFullYear())
-    .maybeSingle();
+    .order('id', { ascending: false })
+    .limit(1);
+  const existing = existingRows && existingRows.length > 0 ? existingRows[0] : null;
 
   let tournamentId;
   // Determine status from start_date — DG's current_round can be stale
@@ -38,13 +42,14 @@ async function syncTournament() {
   const hasStarted = startDate && now >= startDate;
   const newStatus = hasStarted ? 'in_progress' : 'upcoming';
 
-  // Deactivate all other tournaments whenever we set a new active one
-  await supabase
-    .from('tournaments')
-    .update({ is_active: false })
-    .eq('is_active', true);
-
   if (existing) {
+    // Only deactivate OTHER tournaments if we're switching to a different one
+    await supabase
+      .from('tournaments')
+      .update({ is_active: false })
+      .eq('is_active', true)
+      .neq('id', existing.id);
+
     await supabase
       .from('tournaments')
       .update({
@@ -78,6 +83,12 @@ async function syncTournament() {
       }
     }
   } else {
+    // New tournament — deactivate all others before inserting
+    await supabase
+      .from('tournaments')
+      .update({ is_active: false })
+      .eq('is_active', true);
+
     const { data: newTourney } = await supabase
       .from('tournaments')
       .insert({

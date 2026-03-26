@@ -6,6 +6,7 @@ const cache = require('../services/cache');
 const router = express.Router();
 
 // GET /api/lineups/:leagueId — Get my lineup for the active tournament
+// Accepts optional ?tournament_id= to pin to a specific tournament
 router.get('/:leagueId', auth, async (req, res) => {
   try {
     const { data: member } = await supabase
@@ -19,11 +20,22 @@ router.get('/:leagueId', auth, async (req, res) => {
       return res.status(403).json({ error: 'Not a member of this league' });
     }
 
-    const { data: tournament } = await supabase
-      .from('tournaments')
-      .select('id, name')
-      .eq('is_active', true)
-      .maybeSingle();
+    let tournament;
+    if (req.query.tournament_id) {
+      const { data } = await supabase
+        .from('tournaments')
+        .select('id, name')
+        .eq('id', req.query.tournament_id)
+        .maybeSingle();
+      tournament = data;
+    } else {
+      const { data } = await supabase
+        .from('tournaments')
+        .select('id, name')
+        .eq('is_active', true)
+        .maybeSingle();
+      tournament = data;
+    }
 
     if (!tournament) {
       return res.json({ tournament: null, lineup: [], roster: [] });
@@ -57,6 +69,7 @@ router.get('/:leagueId', auth, async (req, res) => {
 
     res.json({
       tournament,
+      tournamentId: tournament.id,
       lineup: (lineup || []).map(l => ({
         playerName: l.player_name,
         slot: l.slot,
@@ -72,8 +85,9 @@ router.get('/:leagueId', auth, async (req, res) => {
 });
 
 // PUT /api/lineups/:leagueId — Set lineup for the active tournament
+// Accepts optional tournament_id in body to pin to a specific tournament
 router.put('/:leagueId', auth, async (req, res) => {
-  const { starters, bench } = req.body;
+  const { starters, bench, tournament_id } = req.body;
 
   try {
     const { data: league } = await supabase
@@ -97,11 +111,22 @@ router.put('/:leagueId', auth, async (req, res) => {
       return res.status(403).json({ error: 'Not a member of this league' });
     }
 
-    const { data: tournament } = await supabase
-      .from('tournaments')
-      .select('id')
-      .eq('is_active', true)
-      .maybeSingle();
+    let tournament;
+    if (tournament_id) {
+      const { data } = await supabase
+        .from('tournaments')
+        .select('id')
+        .eq('id', tournament_id)
+        .maybeSingle();
+      tournament = data;
+    } else {
+      const { data } = await supabase
+        .from('tournaments')
+        .select('id')
+        .eq('is_active', true)
+        .maybeSingle();
+      tournament = data;
+    }
 
     if (!tournament) {
       return res.status(400).json({ error: 'No active tournament' });
@@ -175,6 +200,92 @@ router.put('/:leagueId', auth, async (req, res) => {
     res.json({ message: 'Lineup updated' });
   } catch (err) {
     console.error('Set lineup error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/lineups/admin/set — Manually set lineups for a specific tournament
+// Body: { league_id, tournament_id, lineups: [{ member_id, starters: [...], bench: [...] }] }
+// Secured with ADMIN_SECRET header
+router.post('/admin/set', async (req, res) => {
+  const adminSecret = req.headers['x-admin-secret'];
+  if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  const { league_id, tournament_id, lineups } = req.body;
+
+  if (!league_id || !tournament_id || !Array.isArray(lineups)) {
+    return res.status(400).json({ error: 'Required: league_id, tournament_id, lineups[]' });
+  }
+
+  try {
+    // Verify tournament exists
+    const { data: tournament } = await supabase
+      .from('tournaments')
+      .select('id, name')
+      .eq('id', tournament_id)
+      .maybeSingle();
+
+    if (!tournament) {
+      return res.status(404).json({ error: 'Tournament not found' });
+    }
+
+    const results = [];
+
+    for (const entry of lineups) {
+      const { member_id, starters, bench } = entry;
+      if (!member_id) {
+        results.push({ member_id, error: 'Missing member_id' });
+        continue;
+      }
+
+      // Clear existing unlocked lineup for this member/tournament
+      await supabase
+        .from('lineups')
+        .delete()
+        .eq('league_id', league_id)
+        .eq('member_id', member_id)
+        .eq('tournament_id', tournament_id)
+        .eq('locked', false);
+
+      const rows = [];
+      for (const name of starters || []) {
+        rows.push({
+          league_id,
+          member_id,
+          tournament_id,
+          player_name: name,
+          slot: 'starter',
+        });
+      }
+      for (const name of bench || []) {
+        rows.push({
+          league_id,
+          member_id,
+          tournament_id,
+          player_name: name,
+          slot: 'bench',
+        });
+      }
+
+      if (rows.length > 0) {
+        const { error } = await supabase.from('lineups').upsert(rows, {
+          onConflict: 'league_id,member_id,tournament_id,player_name',
+        });
+        if (error) {
+          results.push({ member_id, error: error.message });
+          continue;
+        }
+      }
+
+      results.push({ member_id, starters: (starters || []).length, bench: (bench || []).length, ok: true });
+    }
+
+    console.log(`[Admin] Set lineups for league ${league_id}, tournament "${tournament.name}" (${tournament_id}): ${results.filter(r => r.ok).length}/${lineups.length} succeeded`);
+    res.json({ tournament: tournament.name, results });
+  } catch (err) {
+    console.error('Admin set lineup error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
