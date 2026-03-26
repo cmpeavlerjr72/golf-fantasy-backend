@@ -439,12 +439,29 @@ async function syncAll() {
   let scoresCount = 0, holeCount = 0, teeTimeCount = 0, tournStatCount = 0;
 
   if (isLive) {
-    scoresCount = await syncLiveScores(tournamentId);
+    // Sync hole scores FIRST — if no holes have been played, the tournament
+    // hasn't truly started and player positions from DG are stale last-week data.
     holeCount = await syncHoleScores(tournamentId);
     tournStatCount = await syncTournamentStats(tournamentId).catch(err => {
       console.error('Tournament stats sync error (may not be live yet):', err.message);
       return 0;
     });
+
+    if (holeCount > 0) {
+      scoresCount = await syncLiveScores(tournamentId);
+    } else {
+      console.log(`[Sync] Tournament "${eventName}" is in_progress but no hole scores from DG yet — skipping leaderboard sync to avoid stale positions`);
+      // Clear any stale positions that may have snuck in
+      const { data: stale } = await supabase
+        .from('player_scores')
+        .select('id')
+        .eq('tournament_id', tournamentId)
+        .limit(1);
+      if (stale && stale.length > 0) {
+        console.log(`[Sync] Clearing stale player_scores for tournament ${tournamentId}`);
+        await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
+      }
+    }
   } else {
     console.log(`[Sync] Tournament "${eventName}" is upcoming — skipping live score sync`);
   }

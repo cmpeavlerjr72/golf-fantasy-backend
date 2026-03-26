@@ -102,11 +102,19 @@ async function tick() {
         const teeTimePassed = !firstTeeTime || new Date() >= firstTeeTime;
 
         if (teeTimePassed) {
-          const [scoreCount, holeCount, statCount] = await Promise.all([
-            syncLiveScores(tournamentId),
+          // Sync hole scores first — only sync leaderboard positions if holes have been played
+          const [holeCount, statCount] = await Promise.all([
             syncHoleScores(tournamentId),
             syncTournamentStats(tournamentId).catch(err => { console.error('Stats sync:', err.message); return 0; }),
           ]);
+          let scoreCount = 0;
+          if (holeCount > 0) {
+            scoreCount = await syncLiveScores(tournamentId);
+          } else {
+            console.log(`[Scheduler] No hole scores yet — skipping leaderboard sync to avoid stale positions`);
+            // Clear any stale positions
+            await supabase.from('player_scores').delete().eq('tournament_id', tournamentId);
+          }
           console.log(`[Scheduler] Synced ${scoreCount} live scores, ${holeCount} hole scores, ${statCount} player stats`);
         } else {
           console.log(`[Scheduler] Tournament in_progress but first tee time (${earliestTee[0].tee_time}) hasn't passed — skipping live scores`);
