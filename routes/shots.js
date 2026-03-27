@@ -217,4 +217,40 @@ router.get('/:playerName/rounds', auth, async (req, res) => {
   }
 });
 
+// GET /api/shots/:playerName/inferred-holes — Get inferred great/poor shot hole associations
+router.get('/:playerName/inferred-holes', auth, async (req, res) => {
+  try {
+    const playerName = decodeURIComponent(req.params.playerName);
+    const tournamentId = parseInt(req.query.tournamentId);
+
+    if (!tournamentId) {
+      return res.status(400).json({ error: 'tournamentId query param required' });
+    }
+
+    const cacheKey = `inferred-holes:${playerName}:${tournamentId}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    const { data: rows } = await supabase
+      .from('inferred_shot_holes')
+      .select('round, shot_type, possible_holes, exact')
+      .eq('tournament_id', tournamentId)
+      .eq('player_name', playerName)
+      .order('created_at');
+
+    const result = { great_shots: [], poor_shots: [] };
+    for (const r of (rows || [])) {
+      const entry = { round: r.round, possible_holes: r.possible_holes, exact: r.exact };
+      if (r.shot_type === 'great') result.great_shots.push(entry);
+      else if (r.shot_type === 'poor') result.poor_shots.push(entry);
+    }
+
+    cache.set(cacheKey, result, 60_000);
+    res.json(result);
+  } catch (err) {
+    console.error('Inferred holes error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

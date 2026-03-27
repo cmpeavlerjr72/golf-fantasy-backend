@@ -370,7 +370,149 @@ async function syncTournamentStats(tournamentId) {
     .from('tournament_field_averages')
     .upsert(avgRow, { onConflict: 'tournament_id' });
 
+  // Snapshot great/poor shot counts for hole inference
+  await snapshotAndInferShots(tournamentId, rows);
+
   return rows.length;
+}
+
+// Snapshot great/poor shot counts and infer which holes they occurred on
+async function snapshotAndInferShots(tournamentId, statsRows) {
+  try {
+    // Get current round for each player from hole_scores (most reliable source)
+    const { data: roundData } = await supabase
+      .from('hole_scores')
+      .select('player_name, round_num')
+      .eq('tournament_id', tournamentId);
+
+    // Build map of player -> max round_num
+    const playerRounds = {};
+    for (const r of (roundData || [])) {
+      const cur = playerRounds[r.player_name] || 0;
+      if (r.round_num > cur) playerRounds[r.player_name] = r.round_num;
+    }
+
+    // Filter to players that have great/poor shot data
+    const playersWithShots = statsRows.filter(
+      r => r.great_shots != null || r.poor_shots != null
+    );
+    if (playersWithShots.length === 0) return;
+
+    // Fetch previous snapshots for all these players (most recent per player)
+    const playerNames = playersWithShots.map(r => r.player_name);
+    const { data: prevSnapshots } = await supabase
+      .from('shot_count_snapshots')
+      .select('*')
+      .eq('tournament_id', tournamentId)
+      .in('player_name', playerNames)
+      .order('synced_at', { ascending: false });
+
+    // Build map: player_name -> most recent snapshot
+    const prevMap = {};
+    for (const snap of (prevSnapshots || [])) {
+      if (!prevMap[snap.player_name]) {
+        prevMap[snap.player_name] = snap;
+      }
+    }
+
+    // Insert new snapshots and detect changes
+    const snapshotRows = [];
+    const inferredRows = [];
+
+    for (const row of playersWithShots) {
+      const thruRaw = row.thru;
+      const thruHole = thruRaw === 'F' ? 18 : parseInt(thruRaw) || 0;
+      const currentRound = playerRounds[row.player_name] || 1;
+
+      snapshotRows.push({
+        tournament_id: tournamentId,
+        player_name: row.player_name,
+        round: currentRound,
+        thru_hole: thruHole,
+        great_shots: row.great_shots,
+        poor_shots: row.poor_shots,
+      });
+
+      const prev = prevMap[row.player_name];
+      if (!prev) continue; // First snapshot for this player, nothing to compare
+
+      // Detect great shot changes
+      const greatDiff = Math.round((row.great_shots || 0) - (prev.great_shots || 0));
+      if (greatDiff > 0) {
+        const holes = getCompletedHoles(prev, { round: currentRound, thru_hole: thruHole });
+        if (holes.holes.length > 0) {
+          for (let i = 0; i < greatDiff; i++) {
+            inferredRows.push({
+              tournament_id: tournamentId,
+              player_name: row.player_name,
+              round: holes.round,
+              shot_type: 'great',
+              possible_holes: holes.holes,
+              exact: holes.holes.length === 1 && greatDiff === 1,
+            });
+          }
+        }
+      }
+
+      // Detect poor shot changes
+      const poorDiff = Math.round((row.poor_shots || 0) - (prev.poor_shots || 0));
+      if (poorDiff > 0) {
+        const holes = getCompletedHoles(prev, { round: currentRound, thru_hole: thruHole });
+        if (holes.holes.length > 0) {
+          for (let i = 0; i < poorDiff; i++) {
+            inferredRows.push({
+              tournament_id: tournamentId,
+              player_name: row.player_name,
+              round: holes.round,
+              shot_type: 'poor',
+              possible_holes: holes.holes,
+              exact: holes.holes.length === 1 && poorDiff === 1,
+            });
+          }
+        }
+      }
+    }
+
+    // Insert snapshots
+    if (snapshotRows.length > 0) {
+      const { error } = await supabase.from('shot_count_snapshots').insert(snapshotRows);
+      if (error) console.error('Shot snapshot insert error:', error.message);
+    }
+
+    // Insert inferred associations
+    if (inferredRows.length > 0) {
+      const { error } = await supabase.from('inferred_shot_holes').insert(inferredRows);
+      if (error) console.error('Inferred shot holes insert error:', error.message);
+      else console.log(`[Sync] Inferred ${inferredRows.length} shot-hole associations`);
+    }
+  } catch (err) {
+    console.error('snapshotAndInferShots error:', err.message);
+  }
+}
+
+// Calculate which holes were completed between two snapshots
+function getCompletedHoles(prev, current) {
+  const prevRound = prev.round || 1;
+  const prevThru = prev.thru_hole || 0;
+  const curRound = current.round;
+  const curThru = current.thru_hole;
+
+  // Same round — holes are between prevThru+1 and curThru
+  if (curRound === prevRound && curThru > prevThru) {
+    const holes = [];
+    for (let h = prevThru + 1; h <= curThru; h++) holes.push(h);
+    return { round: curRound, holes };
+  }
+
+  // New round started (thru reset) — completed holes are 1..curThru in new round
+  if (curRound > prevRound && curThru > 0) {
+    const holes = [];
+    for (let h = 1; h <= curThru; h++) holes.push(h);
+    return { round: curRound, holes };
+  }
+
+  // Edge case: same round, same thru (no new holes) or thru went down unexpectedly
+  return { round: curRound, holes: [] };
 }
 
 // Sync tee times from field-updates data into tee_times table
