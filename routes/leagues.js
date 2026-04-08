@@ -10,6 +10,7 @@ function generateInviteCode() {
 }
 
 const { DEFAULT_SCORING: DEFAULT_SEASON_SCORING } = require('../services/seasonScoring');
+const { enrichStandings } = require('../services/scoreEnrichment');
 
 // POST /api/leagues — Create a new league
 router.post('/', auth, async (req, res) => {
@@ -387,12 +388,16 @@ router.get('/:id/standings', auth, async (req, res) => {
       return a.teamScore - b.teamScore;
     });
 
-    res.json({
+    const result = {
       leagueName: league.name,
       scoringTopN: league.scoring_top_n,
       tournament: tournament || null,
       standings,
-    });
+    };
+
+    await enrichStandings(result);
+
+    res.json(result);
   } catch (err) {
     console.error('Standings error:', err);
     res.status(500).json({ error: 'Server error' });

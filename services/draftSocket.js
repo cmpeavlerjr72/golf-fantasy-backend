@@ -58,7 +58,7 @@ function setupDraftSocket(io) {
       }
     });
 
-    socket.on('start-draft', async ({ leagueId }) => {
+    socket.on('start-draft', async ({ leagueId, draftOrder }) => {
       try {
         if (!leagueId || typeof leagueId !== 'number') return;
 
@@ -72,18 +72,46 @@ function setupDraftSocket(io) {
         if (league.owner_id !== socket.user.id) return;
         if (league.status !== 'pre_draft') return;
 
-        // Get members and shuffle for random draft order
+        // Get members (include draft_order for pinned position detection)
         const { data: members } = await supabase
           .from('league_members')
-          .select('id')
+          .select('id, draft_order')
           .eq('league_id', leagueId);
 
-        const shuffled = members.sort(() => Math.random() - 0.5);
-        for (let i = 0; i < shuffled.length; i++) {
-          await supabase
-            .from('league_members')
-            .update({ draft_order: i + 1 })
-            .eq('id', shuffled[i].id);
+        if (Array.isArray(draftOrder) && draftOrder.length === members.length) {
+          // Commissioner provided a custom draft order (array of member IDs)
+          for (let i = 0; i < draftOrder.length; i++) {
+            await supabase
+              .from('league_members')
+              .update({ draft_order: i + 1 })
+              .eq('id', draftOrder[i]);
+          }
+        } else {
+          // Check for pinned draft positions (draft_order < 0 means pinned to abs value)
+          // e.g. draft_order = -2 means "pin me at position 2"
+          const pinned = members.filter(m => m.draft_order != null && m.draft_order < 0);
+          const unpinned = members.filter(m => !pinned.some(p => p.id === m.id));
+
+          // Build position map: pinned positions are reserved
+          const pinnedMap = new Map(); // position -> member id
+          for (const p of pinned) {
+            pinnedMap.set(Math.abs(p.draft_order), p.id);
+          }
+
+          // Shuffle the unpinned members
+          const shuffled = unpinned.sort(() => Math.random() - 0.5);
+
+          // Assign positions: fill in unpinned around the pinned slots
+          let unpinnedIdx = 0;
+          for (let pos = 1; pos <= members.length; pos++) {
+            const memberId = pinnedMap.has(pos)
+              ? pinnedMap.get(pos)
+              : shuffled[unpinnedIdx++].id;
+            await supabase
+              .from('league_members')
+              .update({ draft_order: pos })
+              .eq('id', memberId);
+          }
         }
 
         await supabase

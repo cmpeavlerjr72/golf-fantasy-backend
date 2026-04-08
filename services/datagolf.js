@@ -104,6 +104,34 @@ async function syncTournament() {
     tournamentId = newTourney.id;
   }
 
+  // For upcoming tournaments, seed player_scores with the field so the
+  // draft screen can display available players before the tournament goes live.
+  // (The /:id/field endpoint reads from player_scores.)
+  if (newStatus === 'upcoming' && field.field && field.field.length > 0) {
+    const fieldRows = field.field.map(p => ({
+      tournament_id: tournamentId,
+      player_name: p.player_name,
+      position: null,
+      score_to_par: null,
+      thru: null,
+      today: null,
+      round1: null,
+      round2: null,
+      round3: null,
+      round4: null,
+      updated_at: new Date().toISOString(),
+    }));
+
+    for (let i = 0; i < fieldRows.length; i += 500) {
+      const batch = fieldRows.slice(i, i + 500);
+      const { error } = await supabase.from('player_scores').upsert(batch, {
+        onConflict: 'tournament_id,player_name',
+      });
+      if (error) console.error('Field seed upsert error:', error.message);
+    }
+    console.log(`[Sync] Seeded ${fieldRows.length} field players into player_scores for upcoming "${field.event_name}"`);
+  }
+
   return { tournamentId, eventName: field.event_name, field: field.field };
 }
 

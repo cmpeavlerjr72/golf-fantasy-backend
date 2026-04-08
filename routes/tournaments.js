@@ -2,6 +2,7 @@ const express = require('express');
 const supabase = require('../config/supabase');
 const auth = require('../middleware/auth');
 const cache = require('../services/cache');
+const { enrichLeaderboard } = require('../services/scoreEnrichment');
 
 const router = express.Router();
 
@@ -132,6 +133,8 @@ router.get('/leaderboard', auth, async (req, res) => {
         round4: s.round4,
       })),
     };
+
+    await enrichLeaderboard(result);
 
     cache.set('leaderboard', result, 60_000); // 1 min cache
     res.json(result);
