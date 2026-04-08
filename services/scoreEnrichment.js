@@ -57,9 +57,40 @@ function countryToFlag(code3) {
   return String.fromCodePoint(c1, c2);
 }
 
-// ─── Masters player data (country lookup) ──────────────────────────────────
-// Built from masters.com player feed — maps normalized name to country code
-let mastersPlayerMap = null;
+// ─── Masters 2026 player countries (embedded to avoid external file dep) ────
+const MASTERS_2026_COUNTRIES = {
+  "ludvig aberg": "SWE", "daniel berger": "USA", "akshay bhatia": "USA",
+  "keegan bradley": "USA", "michael brennan": "USA", "jacob bridgeman": "USA",
+  "sam burns": "USA", "angel cabrera": "ARG", "brian campbell": "USA",
+  "patrick cantlay": "USA", "wyndham clark": "USA", "corey conners": "CAN",
+  "fred couples": "USA", "jason day": "AUS", "bryson dechambeau": "USA",
+  "nicolas echavarria": "COL", "harris english": "USA", "ethan fang": "USA",
+  "matt fitzpatrick": "ENG", "tommy fleetwood": "ENG", "ryan fox": "NZL",
+  "sergio garcia": "ESP", "ryan gerard": "USA", "chris gotterup": "USA",
+  "max greyserman": "USA", "ben griffin": "USA", "harry hall": "ENG",
+  "brian harman": "USA", "tyrrell hatton": "ENG", "russell henley": "USA",
+  "jackson herrington": "USA", "nicolai hjgaard": "DEN", "rasmus hjgaard": "DEN",
+  "brandon holtz": "USA", "max homa": "USA", "viktor hovland": "NOR",
+  "mason howell": "USA", "sungjae im": "KOR", "casey jarvis": "RSA",
+  "dustin johnson": "USA", "zach johnson": "USA", "naoyuki kataoka": "JPN",
+  "john keefer": "USA", "michael kim": "USA", "si woo kim": "KOR",
+  "kurt kitayama": "USA", "jake knapp": "USA", "brooks koepka": "USA",
+  "fifa laopakdee": "THA", "min woo lee": "AUS", "haotong li": "CHN",
+  "shane lowry": "IRL", "robert macintyre": "SCO", "hideki matsuyama": "JPN",
+  "matt mccarty": "USA", "rory mcilroy": "NIR", "tom mckibbin": "NIR",
+  "maverick mcnealy": "USA", "collin morikawa": "USA",
+  "rasmus neergaardpetersen": "DEN", "alex noren": "SWE", "andrew novak": "USA",
+  "jose maria olazabal": "ESP", "carlos ortiz": "MEX", "marco penge": "ENG",
+  "aldrich potgieter": "RSA", "mateo pulcini": "ARG", "jon rahm": "ESP",
+  "aaron rai": "ENG", "patrick reed": "USA", "kristoffer reitan": "NOR",
+  "davis riley": "USA", "justin rose": "ENG", "xander schauffele": "USA",
+  "scottie scheffler": "USA", "charl schwartzel": "RSA", "adam scott": "AUS",
+  "vijay singh": "FIJ", "cameron smith": "AUS", "jj spaun": "USA",
+  "jordan spieth": "USA", "samuel stevens": "USA", "sepp straka": "AUT",
+  "nick taylor": "CAN", "justin thomas": "USA", "sami valimaki": "FIN",
+  "bubba watson": "USA", "mike weir": "CAN", "danny willett": "ENG",
+  "gary woodland": "USA", "cameron young": "USA",
+};
 
 function normalizeName(name) {
   return (name || '').toLowerCase()
@@ -67,30 +98,8 @@ function normalizeName(name) {
     .replace(/[^a-z ]/g, '').trim();
 }
 
-function loadMastersPlayers() {
-  if (mastersPlayerMap) return mastersPlayerMap;
-  try {
-    const data = require('../../range_tracker/players.json');
-    mastersPlayerMap = new Map();
-    for (const p of data.players || []) {
-      if (p.real_player && p.countryCode) {
-        mastersPlayerMap.set(normalizeName(p.name), p.countryCode);
-        // Also index by "Last, First" format in case DG uses that
-        mastersPlayerMap.set(normalizeName(p.last_name + ' ' + p.first_name), p.countryCode);
-      }
-    }
-    console.log(`[Enrichment] Loaded ${mastersPlayerMap.size} Masters player entries`);
-    return mastersPlayerMap;
-  } catch (e) {
-    console.error('[Enrichment] Could not load masters players.json:', e.message);
-    mastersPlayerMap = new Map();
-    return mastersPlayerMap;
-  }
-}
-
 function getCountryFlag(playerName) {
-  const map = loadMastersPlayers();
-  const code = map.get(normalizeName(playerName));
+  const code = MASTERS_2026_COUNTRIES[normalizeName(playerName)];
   if (!code) return '';
   return countryToFlag(code);
 }
