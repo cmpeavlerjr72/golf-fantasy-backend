@@ -5,6 +5,18 @@ const { notifyDraftStarted, notifyDraftTurn } = require('./notifications');
 const MAX_CONNECTIONS_PER_USER = 5;
 const PICK_COOLDOWN_MS = 1000; // 1 sec between picks
 
+// Normalize player names so "Scheffler, Scottie" and "Scottie Scheffler" match
+function normalizePlayerName(name) {
+  if (!name) return '';
+  const trimmed = name.trim();
+  // "Last, First" → "First Last"
+  if (trimmed.includes(',')) {
+    const [last, ...rest] = trimmed.split(',');
+    return [rest.join(',').trim(), last.trim()].filter(Boolean).join(' ').toLowerCase();
+  }
+  return trimmed.toLowerCase();
+}
+
 function setupDraftSocket(io) {
   // Track connections per user to prevent abuse
   const userConnections = new Map(); // userId -> count
@@ -188,9 +200,12 @@ function setupDraftSocket(io) {
 
         if (currentMember.id !== socket.memberId) return;
 
+        // Normalize incoming name so "Last, First" and "First Last" are treated the same
+        const normalizedIncoming = normalizePlayerName(playerName);
+
         // Check if player already drafted
         const alreadyPicked = (picks || []).some(
-          p => p.player_name.toLowerCase() === playerName.toLowerCase()
+          p => normalizePlayerName(p.player_name) === normalizedIncoming
         );
         if (alreadyPicked) {
           socket.emit('draft-error', { message: 'Player already drafted' });
@@ -202,7 +217,7 @@ function setupDraftSocket(io) {
           .insert({
             league_id: leagueId,
             member_id: currentMember.id,
-            player_name: playerName,
+            player_name: playerName.trim(),
             player_id: playerId || null,
             round: round + 1,
             pick_number: currentPick + 1,
