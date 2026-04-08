@@ -203,6 +203,26 @@ function setupDraftSocket(io) {
         // Normalize incoming name so "Last, First" and "First Last" are treated the same
         const normalizedIncoming = normalizePlayerName(playerName);
 
+        // For pool leagues, validate the player exists in the tournament field
+        // and resolve to the canonical name from our data
+        let canonicalName = playerName.trim();
+        if (league.league_type === 'pool' && league.tournament_id) {
+          const { data: fieldPlayers } = await supabase
+            .from('player_scores')
+            .select('player_name')
+            .eq('tournament_id', league.tournament_id);
+
+          const match = (fieldPlayers || []).find(
+            fp => normalizePlayerName(fp.player_name) === normalizedIncoming
+          );
+          if (!match) {
+            socket.emit('draft-error', { message: 'Player not in tournament field' });
+            return;
+          }
+          // Use the exact name from our database so it matches the client's player list
+          canonicalName = match.player_name;
+        }
+
         // Check if player already drafted
         const alreadyPicked = (picks || []).some(
           p => normalizePlayerName(p.player_name) === normalizedIncoming
@@ -217,7 +237,7 @@ function setupDraftSocket(io) {
           .insert({
             league_id: leagueId,
             member_id: currentMember.id,
-            player_name: playerName.trim(),
+            player_name: canonicalName,
             player_id: playerId || null,
             round: round + 1,
             pick_number: currentPick + 1,
