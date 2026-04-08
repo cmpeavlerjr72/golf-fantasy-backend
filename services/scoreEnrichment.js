@@ -99,7 +99,15 @@ function normalizeName(name) {
 }
 
 function getCountryFlag(playerName) {
-  const code = MASTERS_2026_COUNTRIES[normalizeName(playerName)];
+  // Try as-is first (e.g. "Scottie Scheffler")
+  let code = MASTERS_2026_COUNTRIES[normalizeName(playerName)];
+  if (!code && playerName.includes(',')) {
+    // Data Golf uses "Last, First" — flip to "First Last"
+    const parts = playerName.split(',').map(s => s.trim());
+    if (parts.length === 2) {
+      code = MASTERS_2026_COUNTRIES[normalizeName(parts[1] + ' ' + parts[0])];
+    }
+  }
   if (!code) return '';
   return countryToFlag(code);
 }
