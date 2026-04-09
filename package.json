@@ -17,6 +17,7 @@
     "express": "^4.21.2",
     "express-rate-limit": "^8.3.1",
     "jsonwebtoken": "^9.0.2",
+    "proj4": "^2.20.8",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {

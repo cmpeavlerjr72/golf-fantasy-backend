@@ -94,53 +94,46 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
     // Detect if this is a Masters tournament (uses masters.com coordinate system)
     const isMasters = pgaTournId === 'R2026014';
 
-    // For the Masters, we need to transform mathx/mathy coords into 0-1 normalized
-    // values that map onto the masters.com hole map images.
-    // The hole maps are oriented tee-left → green-right.
-    // We use the tee and pin as anchor points, placing the tee at ~12% from left
-    // and pin at ~85% from left, then linearly interpolate all shots.
+    // For the Masters, shot coordinates are Georgia State Plane xo/yo values
+    // stored in enhanced_x/enhanced_y. The ESRI satellite overlay image is
+    // generated with a bounding box computed from tee/pin + padding.
+    // The transform is a simple linear mapping: xo/yo → 0-1 normalized.
+    //
+    // IMPORTANT: State Plane xo increases EAST, yo increases NORTH.
+    // Image pixel x increases RIGHT, pixel y increases DOWN.
+    // So: nx = (xo - xo_min) / (xo_max - xo_min)
+    //     ny = (yo_max - yo) / (yo_max - yo_min)  ← Y is flipped
     function mastersCoordTransform(holeNum, overlay, rawStrokes) {
-      const teeX = overlay.tee_enhanced_x;
-      const teeY = overlay.tee_enhanced_y;
-      const pinX = overlay.pin_enhanced_x;
-      const pinY = overlay.pin_enhanced_y;
+      const teeXo = overlay.tee_enhanced_x;
+      const teeYo = overlay.tee_enhanced_y;
+      const pinXo = overlay.pin_enhanced_x;
+      const pinYo = overlay.pin_enhanced_y;
 
-      if (teeX == null || pinX == null) return rawStrokes;
-      if (teeX === 0 && teeY === 0) return rawStrokes;
-      if (pinX === 0 && pinY === 0) return rawStrokes;
+      if (teeXo == null || pinXo == null) return rawStrokes;
+      if (teeXo === 0 && teeYo === 0) return rawStrokes;
+      if (pinXo === 0 && pinYo === 0) return rawStrokes;
 
-      // Direction vector from tee to pin (the "main axis" of the hole)
-      const dx = pinX - teeX;
-      const dy = pinY - teeY;
-      const len = Math.sqrt(dx * dx + dy * dy);
-      if (len === 0) return rawStrokes;
+      // Compute State Plane bounding box (same padding used in image generation)
+      const padX = Math.abs(pinXo - teeXo) * 0.25 || 100;
+      const padY = Math.abs(pinYo - teeYo) * 0.25 || 100;
+      const xoMin = Math.min(teeXo, pinXo) - padX;
+      const xoMax = Math.max(teeXo, pinXo) + padX;
+      const yoMin = Math.min(teeYo, pinYo) - padY;
+      const yoMax = Math.max(teeYo, pinYo) + padY;
+      const xoRange = xoMax - xoMin;
+      const yoRange = yoMax - yoMin;
 
-      // Unit vectors: along hole (u) and perpendicular (v)
-      const ux = dx / len, uy = dy / len;
-      const vx = -uy, vy = ux; // perpendicular (positive = left of play line)
+      if (xoRange === 0 || yoRange === 0) return rawStrokes;
 
-      // Convert a mathx/mathy point to 0-1 image coords
-      // Along-hole: tee maps to x=0.12, pin maps to x=0.85
-      // Cross-hole: center line maps to y=0.50, with some spread
-      const TEE_X_NORM = 0.12, PIN_X_NORM = 0.85;
-      const CENTER_Y_NORM = 0.50;
-      const CROSS_SCALE = 0.35 / len; // lateral spread relative to hole length
-
-      function toNorm(mx, my) {
-        if (mx == null || my == null) return null;
-        const relX = mx - teeX;
-        const relY = my - teeY;
-        // Project onto along-hole and cross-hole axes
-        const along = relX * ux + relY * uy; // distance along tee→pin direction
-        const cross = relX * vx + relY * vy; // perpendicular distance
-        const normX = TEE_X_NORM + (along / len) * (PIN_X_NORM - TEE_X_NORM);
-        const normY = CENTER_Y_NORM - cross * CROSS_SCALE;
-        return { x: Math.max(0, Math.min(1, normX)), y: Math.max(0, Math.min(1, normY)) };
+      function toNorm(xo, yo) {
+        if (xo == null || yo == null) return null;
+        return {
+          x: Math.max(0, Math.min(1, (xo - xoMin) / xoRange)),
+          y: Math.max(0, Math.min(1, (yoMax - yo) / yoRange)), // Y flipped
+        };
       }
 
-      // Build from/to pairs: shot N's position is the "to" of shot N, and "from" of shot N+1
-      // The tee is the "from" for the first shot
-      const teeNorm = toNorm(teeX, teeY);
+      const teeNorm = toNorm(teeXo, teeYo);
 
       return rawStrokes.map((s, i) => {
         const shotPos = toNorm(s._rawX, s._rawY);
@@ -163,9 +156,27 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
         const hasValidCoords = isMasters && overlay.tee_enhanced_x && overlay.pin_enhanced_x
           && !(overlay.tee_enhanced_x === 0 && overlay.tee_enhanced_y === 0)
           && !(overlay.pin_enhanced_x === 0 && overlay.pin_enhanced_y === 0);
-        const overlayUrl = isMasters
-          ? (hasValidCoords ? `https://www.masters.com/assets/images/course/angc/hole-map-${s.hole_number}.jpg` : null)
-          : (overlay.overlay_full_url || null);
+
+        // For the Masters, generate the ESRI satellite image URL on the fly
+        // using the same bbox the coordinate transform uses
+        let overlayUrl;
+        if (isMasters && hasValidCoords) {
+          const proj4 = require('proj4');
+          const GA_SP = '+proj=tmerc +lat_0=30 +lon_0=-82.16666666666667 +k=0.9999 +x_0=200000 +y_0=0 +datum=NAD83 +units=us-ft +no_defs';
+          const tXo = overlay.tee_enhanced_x, tYo = overlay.tee_enhanced_y;
+          const pXo = overlay.pin_enhanced_x, pYo = overlay.pin_enhanced_y;
+          const padX = Math.abs(pXo - tXo) * 0.25 || 100;
+          const padY = Math.abs(pYo - tYo) * 0.25 || 100;
+          const spXMin = Math.min(tXo, pXo) - padX, spXMax = Math.max(tXo, pXo) + padX;
+          const spYMin = Math.min(tYo, pYo) - padY, spYMax = Math.max(tYo, pYo) + padY;
+          const [w, s2] = proj4(GA_SP, 'EPSG:4326', [spXMin, spYMin]);
+          const [e2, n] = proj4(GA_SP, 'EPSG:4326', [spXMax, spYMax]);
+          overlayUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${w},${s2},${e2},${n}&bboxSR=4326&size=1200,800&format=png&f=image`;
+        } else if (isMasters) {
+          overlayUrl = null;
+        } else {
+          overlayUrl = overlay.overlay_full_url || null;
+        }
 
         holesMap[s.hole_number] = {
           holeNumber: s.hole_number,
