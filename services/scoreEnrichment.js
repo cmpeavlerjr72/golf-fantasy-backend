@@ -199,6 +199,7 @@ async function enrichStandings(standingsData) {
       }
 
       // 3. Country flag on player name (last — so other lookups use raw name)
+      player.rawPlayerName = rawName;
       const flag = getCountryFlag(rawName);
       if (flag) {
         player.playerName = flag + ' ' + player.playerName;
@@ -249,6 +250,7 @@ async function enrichLeaderboard(leaderboardData) {
     }
 
     // 3. Country flag (last)
+    player.rawPlayerName = rawName;
     const flag = getCountryFlag(rawName);
     if (flag) {
       player.playerName = flag + ' ' + player.playerName;
