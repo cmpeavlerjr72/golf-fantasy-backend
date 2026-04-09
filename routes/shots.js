@@ -94,46 +94,69 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
     // Detect if this is a Masters tournament (uses masters.com coordinate system)
     const isMasters = pgaTournId === 'R2026014';
 
-    // For the Masters, shot coordinates are Georgia State Plane xo/yo values
-    // stored in enhanced_x/enhanced_y. The ESRI satellite overlay image is
-    // generated with a bounding box computed from tee/pin + padding.
-    // The transform is a simple linear mapping: xo/yo → 0-1 normalized.
+    // Masters shot coords are Georgia State Plane xo/yo (NAD83 US feet).
+    // We serve ESRI satellite images with a matching bounding box.
     //
-    // IMPORTANT: State Plane xo increases EAST, yo increases NORTH.
-    // Image pixel x increases RIGHT, pixel y increases DOWN.
-    // So: nx = (xo - xo_min) / (xo_max - xo_min)
-    //     ny = (yo_max - yo) / (yo_max - yo_min)  ← Y is flipped
-    function mastersCoordTransform(holeNum, overlay, rawStrokes) {
+    // CRITICAL: The bbox must be aspect-ratio-adjusted to match the image
+    // dimensions (1200x800 = 3:2). Otherwise ESRI stretches the image and
+    // the coordinate mapping breaks.
+    const MASTERS_IMG_W = 1200, MASTERS_IMG_H = 800;
+    const MASTERS_ASPECT = MASTERS_IMG_W / MASTERS_IMG_H; // 1.5
+
+    function mastersGetBbox(overlay) {
       const teeXo = overlay.tee_enhanced_x;
       const teeYo = overlay.tee_enhanced_y;
       const pinXo = overlay.pin_enhanced_x;
       const pinYo = overlay.pin_enhanced_y;
 
-      if (teeXo == null || pinXo == null) return rawStrokes;
-      if (teeXo === 0 && teeYo === 0) return rawStrokes;
-      if (pinXo === 0 && pinYo === 0) return rawStrokes;
+      if (teeXo == null || pinXo == null) return null;
+      if (teeXo === 0 && teeYo === 0) return null;
+      if (pinXo === 0 && pinYo === 0) return null;
 
-      // Compute State Plane bounding box (same padding used in image generation)
+      // Base bbox with 25% padding
       const padX = Math.abs(pinXo - teeXo) * 0.25 || 100;
       const padY = Math.abs(pinYo - teeYo) * 0.25 || 100;
-      const xoMin = Math.min(teeXo, pinXo) - padX;
-      const xoMax = Math.max(teeXo, pinXo) + padX;
-      const yoMin = Math.min(teeYo, pinYo) - padY;
-      const yoMax = Math.max(teeYo, pinYo) + padY;
+      let xoMin = Math.min(teeXo, pinXo) - padX;
+      let xoMax = Math.max(teeXo, pinXo) + padX;
+      let yoMin = Math.min(teeYo, pinYo) - padY;
+      let yoMax = Math.max(teeYo, pinYo) + padY;
+
+      // Adjust to match image aspect ratio (3:2)
+      const spW = xoMax - xoMin;
+      const spH = yoMax - yoMin;
+      const curRatio = spW / spH;
+      if (curRatio < MASTERS_ASPECT) {
+        const newW = spH * MASTERS_ASPECT;
+        const cx = (xoMin + xoMax) / 2;
+        xoMin = cx - newW / 2;
+        xoMax = cx + newW / 2;
+      } else {
+        const newH = spW / MASTERS_ASPECT;
+        const cy = (yoMin + yoMax) / 2;
+        yoMin = cy - newH / 2;
+        yoMax = cy + newH / 2;
+      }
+
+      return { xoMin, xoMax, yoMin, yoMax };
+    }
+
+    function mastersCoordTransform(holeNum, overlay, rawStrokes) {
+      const bbox = mastersGetBbox(overlay);
+      if (!bbox) return rawStrokes;
+
+      const { xoMin, xoMax, yoMin, yoMax } = bbox;
       const xoRange = xoMax - xoMin;
       const yoRange = yoMax - yoMin;
-
-      if (xoRange === 0 || yoRange === 0) return rawStrokes;
 
       function toNorm(xo, yo) {
         if (xo == null || yo == null) return null;
         return {
           x: Math.max(0, Math.min(1, (xo - xoMin) / xoRange)),
-          y: Math.max(0, Math.min(1, (yoMax - yo) / yoRange)), // Y flipped
+          y: Math.max(0, Math.min(1, (yoMax - yo) / yoRange)),
         };
       }
 
-      const teeNorm = toNorm(teeXo, teeYo);
+      const teeNorm = toNorm(overlay.tee_enhanced_x, overlay.tee_enhanced_y);
 
       return rawStrokes.map((s, i) => {
         const shotPos = toNorm(s._rawX, s._rawY);
@@ -157,21 +180,20 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
           && !(overlay.tee_enhanced_x === 0 && overlay.tee_enhanced_y === 0)
           && !(overlay.pin_enhanced_x === 0 && overlay.pin_enhanced_y === 0);
 
-        // For the Masters, generate the ESRI satellite image URL on the fly
-        // using the same bbox the coordinate transform uses
+        // For the Masters, generate the ESRI satellite image URL using the
+        // same aspect-ratio-adjusted bbox that the coordinate transform uses
         let overlayUrl;
         if (isMasters && hasValidCoords) {
-          const proj4 = require('proj4');
-          const GA_SP = '+proj=tmerc +lat_0=30 +lon_0=-82.16666666666667 +k=0.9999 +x_0=200000 +y_0=0 +datum=NAD83 +units=us-ft +no_defs';
-          const tXo = overlay.tee_enhanced_x, tYo = overlay.tee_enhanced_y;
-          const pXo = overlay.pin_enhanced_x, pYo = overlay.pin_enhanced_y;
-          const padX = Math.abs(pXo - tXo) * 0.25 || 100;
-          const padY = Math.abs(pYo - tYo) * 0.25 || 100;
-          const spXMin = Math.min(tXo, pXo) - padX, spXMax = Math.max(tXo, pXo) + padX;
-          const spYMin = Math.min(tYo, pYo) - padY, spYMax = Math.max(tYo, pYo) + padY;
-          const [w, s2] = proj4(GA_SP, 'EPSG:4326', [spXMin, spYMin]);
-          const [e2, n] = proj4(GA_SP, 'EPSG:4326', [spXMax, spYMax]);
-          overlayUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${w},${s2},${e2},${n}&bboxSR=4326&size=1200,800&format=png&f=image`;
+          const bbox = mastersGetBbox(overlay);
+          if (bbox) {
+            const proj4 = require('proj4');
+            const GA_SP = '+proj=tmerc +lat_0=30 +lon_0=-82.16666666666667 +k=0.9999 +x_0=200000 +y_0=0 +datum=NAD83 +units=us-ft +no_defs';
+            const [w, s2] = proj4(GA_SP, 'EPSG:4326', [bbox.xoMin, bbox.yoMin]);
+            const [e2, n] = proj4(GA_SP, 'EPSG:4326', [bbox.xoMax, bbox.yoMax]);
+            overlayUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${w},${s2},${e2},${n}&bboxSR=4326&size=${MASTERS_IMG_W},${MASTERS_IMG_H}&format=png&f=image`;
+          } else {
+            overlayUrl = null;
+          }
         } else if (isMasters) {
           overlayUrl = null;
         } else {
@@ -225,18 +247,21 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
       for (const hole of Object.values(holesMap)) {
         if (hole._overlay && hole.strokes.length > 0) {
           hole.strokes = mastersCoordTransform(hole.holeNumber, hole._overlay, hole.strokes);
-          // Normalize pin position too
-          const pinNorm = (() => {
+          // Normalize pin and tee positions using same bbox
+          const bbox = mastersGetBbox(hole._overlay);
+          if (bbox) {
+            const { xoMin, xoMax, yoMin, yoMax } = bbox;
+            const xr = xoMax - xoMin, yr = yoMax - yoMin;
             const o = hole._overlay;
-            if (o.tee_enhanced_x == null || o.pin_enhanced_x == null) return null;
-            const dx = o.pin_enhanced_x - o.tee_enhanced_x;
-            const dy = o.pin_enhanced_y - o.tee_enhanced_y;
-            const len = Math.sqrt(dx * dx + dy * dy);
-            if (len === 0) return null;
-            return { x: 0.85, y: 0.50 }; // pin is always at the anchor point
-          })();
-          if (pinNorm) hole.pin = pinNorm;
-          hole.tee = { x: 0.12, y: 0.50 };
+            hole.pin = {
+              x: (o.pin_enhanced_x - xoMin) / xr,
+              y: (yoMax - o.pin_enhanced_y) / yr,
+            };
+            hole.tee = {
+              x: (o.tee_enhanced_x - xoMin) / xr,
+              y: (yoMax - o.tee_enhanced_y) / yr,
+            };
+          }
         }
         delete hole._overlay;
         // Clean up internal fields from strokes
