@@ -106,6 +106,8 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
       const pinY = overlay.pin_enhanced_y;
 
       if (teeX == null || pinX == null) return rawStrokes;
+      if (teeX === 0 && teeY === 0) return rawStrokes;
+      if (pinX === 0 && pinY === 0) return rawStrokes;
 
       // Direction vector from tee to pin (the "main axis" of the hole)
       const dx = pinX - teeX;
@@ -158,8 +160,11 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
     for (const s of shots) {
       if (!holesMap[s.hole_number]) {
         const overlay = overlayMap[s.hole_number] || {};
+        const hasValidCoords = isMasters && overlay.tee_enhanced_x && overlay.pin_enhanced_x
+          && !(overlay.tee_enhanced_x === 0 && overlay.tee_enhanced_y === 0)
+          && !(overlay.pin_enhanced_x === 0 && overlay.pin_enhanced_y === 0);
         const overlayUrl = isMasters
-          ? `https://www.masters.com/assets/images/course/angc/hole-map-${s.hole_number}.jpg`
+          ? (hasValidCoords ? `https://www.masters.com/assets/images/course/angc/hole-map-${s.hole_number}.jpg` : null)
           : (overlay.overlay_full_url || null);
 
         holesMap[s.hole_number] = {
