@@ -91,21 +91,88 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
       overlayMap[o.hole_number] = o;
     }
 
+    // Detect if this is a Masters tournament (uses masters.com coordinate system)
+    const isMasters = pgaTournId === 'R2026014';
+
+    // For the Masters, we need to transform mathx/mathy coords into 0-1 normalized
+    // values that map onto the masters.com hole map images.
+    // The hole maps are oriented tee-left → green-right.
+    // We use the tee and pin as anchor points, placing the tee at ~12% from left
+    // and pin at ~85% from left, then linearly interpolate all shots.
+    function mastersCoordTransform(holeNum, overlay, rawStrokes) {
+      const teeX = overlay.tee_enhanced_x;
+      const teeY = overlay.tee_enhanced_y;
+      const pinX = overlay.pin_enhanced_x;
+      const pinY = overlay.pin_enhanced_y;
+
+      if (teeX == null || pinX == null) return rawStrokes;
+
+      // Direction vector from tee to pin (the "main axis" of the hole)
+      const dx = pinX - teeX;
+      const dy = pinY - teeY;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len === 0) return rawStrokes;
+
+      // Unit vectors: along hole (u) and perpendicular (v)
+      const ux = dx / len, uy = dy / len;
+      const vx = -uy, vy = ux; // perpendicular (positive = left of play line)
+
+      // Convert a mathx/mathy point to 0-1 image coords
+      // Along-hole: tee maps to x=0.12, pin maps to x=0.85
+      // Cross-hole: center line maps to y=0.50, with some spread
+      const TEE_X_NORM = 0.12, PIN_X_NORM = 0.85;
+      const CENTER_Y_NORM = 0.50;
+      const CROSS_SCALE = 0.35 / len; // lateral spread relative to hole length
+
+      function toNorm(mx, my) {
+        if (mx == null || my == null) return null;
+        const relX = mx - teeX;
+        const relY = my - teeY;
+        // Project onto along-hole and cross-hole axes
+        const along = relX * ux + relY * uy; // distance along tee→pin direction
+        const cross = relX * vx + relY * vy; // perpendicular distance
+        const normX = TEE_X_NORM + (along / len) * (PIN_X_NORM - TEE_X_NORM);
+        const normY = CENTER_Y_NORM - cross * CROSS_SCALE;
+        return { x: Math.max(0, Math.min(1, normX)), y: Math.max(0, Math.min(1, normY)) };
+      }
+
+      // Build from/to pairs: shot N's position is the "to" of shot N, and "from" of shot N+1
+      // The tee is the "from" for the first shot
+      const teeNorm = toNorm(teeX, teeY);
+
+      return rawStrokes.map((s, i) => {
+        const shotPos = toNorm(s._rawX, s._rawY);
+        const prevPos = i === 0 ? teeNorm : toNorm(rawStrokes[i - 1]._rawX, rawStrokes[i - 1]._rawY);
+        return {
+          ...s,
+          from: prevPos,
+          to: shotPos,
+          greenFrom: null,
+          greenTo: null,
+        };
+      });
+    }
+
     // Group shots by hole
     const holesMap = {};
     for (const s of shots) {
       if (!holesMap[s.hole_number]) {
         const overlay = overlayMap[s.hole_number] || {};
+        const overlayUrl = isMasters
+          ? `https://www.masters.com/assets/images/course/angc/hole-map-${s.hole_number}.jpg`
+          : (overlay.overlay_full_url || null);
+
         holesMap[s.hole_number] = {
           holeNumber: s.hole_number,
           par: s.par,
           score: s.hole_score,
           yardage: s.hole_yardage,
-          overlayFullUrl: overlay.overlay_full_url || null,
-          overlayGreenUrl: overlay.overlay_green_url || null,
+          overlayFullUrl: overlayUrl,
+          overlayGreenUrl: isMasters ? null : (overlay.overlay_green_url || null),
           tee: overlay.tee_enhanced_x != null ? { x: overlay.tee_enhanced_x, y: overlay.tee_enhanced_y } : null,
           pin: overlay.pin_enhanced_x != null ? { x: overlay.pin_enhanced_x, y: overlay.pin_enhanced_y } : null,
           pinGreen: overlay.pin_green_enhanced_x != null ? { x: overlay.pin_green_enhanced_x, y: overlay.pin_green_enhanced_y } : null,
+          _overlay: overlay, // keep raw for transform
           strokes: [],
         };
       }
@@ -123,6 +190,8 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
         to: s.enhanced_to_x != null ? { x: s.enhanced_to_x, y: s.enhanced_to_y } : null,
         greenFrom: s.green_enhanced_x != null ? { x: s.green_enhanced_x, y: s.green_enhanced_y } : null,
         greenTo: s.green_enhanced_to_x != null ? { x: s.green_enhanced_to_x, y: s.green_enhanced_to_y } : null,
+        _rawX: s.enhanced_x, // preserve for Masters transform
+        _rawY: s.enhanced_y,
         radar: s.club_speed ? {
           clubSpeed: s.club_speed,
           ballSpeed: s.ball_speed,
@@ -133,6 +202,33 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
         } : null,
         commentary: commMap[`${s.hole_number}_${s.stroke_number}`] || null,
       });
+    }
+
+    // Apply Masters coordinate transform if needed
+    if (isMasters) {
+      for (const hole of Object.values(holesMap)) {
+        if (hole._overlay && hole.strokes.length > 0) {
+          hole.strokes = mastersCoordTransform(hole.holeNumber, hole._overlay, hole.strokes);
+          // Normalize pin position too
+          const pinNorm = (() => {
+            const o = hole._overlay;
+            if (o.tee_enhanced_x == null || o.pin_enhanced_x == null) return null;
+            const dx = o.pin_enhanced_x - o.tee_enhanced_x;
+            const dy = o.pin_enhanced_y - o.tee_enhanced_y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len === 0) return null;
+            return { x: 0.85, y: 0.50 }; // pin is always at the anchor point
+          })();
+          if (pinNorm) hole.pin = pinNorm;
+          hole.tee = { x: 0.12, y: 0.50 };
+        }
+        delete hole._overlay;
+        // Clean up internal fields from strokes
+        for (const s of hole.strokes) {
+          delete s._rawX;
+          delete s._rawY;
+        }
+      }
     }
 
     const holes = Object.values(holesMap).sort((a, b) => a.holeNumber - b.holeNumber);
