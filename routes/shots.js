@@ -206,6 +206,8 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
       available: true,
       player: mapping.pga_display_name,
       playerName,
+      pgaPlayerId,
+      isMasters,
       tournament: tournMapping.tournament_name,
       round,
       totalScore,
