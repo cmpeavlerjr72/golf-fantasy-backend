@@ -100,7 +100,24 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
     // Shot coordinates (xo/yo State Plane) are mapped onto the images using
     // a 2-point affine calibration (tee + pin anchors). The calibration data
     // was determined by visual inspection of each hole-map image.
+    //
+    // IMPORTANT: The frontend container has aspectRatio=2.34 (PGA pickle ratio)
+    // but Masters images are 16:9 (1.778). With resizeMode="contain", the image
+    // is letterboxed — it only fills ~76% of the container width, centered.
+    // We must remap x-coordinates from image-space to container-space.
     const mastersCalibration = require('../data/masters-hole-calibration.json');
+    const CONTAINER_AR = 2.34;
+    const MASTERS_IMG_AR = 2880 / 1620; // 1.778
+    const IMG_WIDTH_FRAC = MASTERS_IMG_AR / CONTAINER_AR; // ~0.76
+    const IMG_X_OFFSET = (1 - IMG_WIDTH_FRAC) / 2; // ~0.12
+
+    // Convert image-normalized coords to container-normalized coords
+    function imgToContainer(nx, ny) {
+      return {
+        x: IMG_X_OFFSET + nx * IMG_WIDTH_FRAC,
+        y: ny,
+      };
+    }
 
     function mastersCoordTransform(holeNum, overlay, rawStrokes) {
       const cal = mastersCalibration.holes[String(holeNum)];
@@ -129,10 +146,13 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
         const rx = xo - tXo, ry = yo - tYo;
         const along = (rx * ux + ry * uy) / len; // 0=tee, 1=pin
         const cross = (rx * vx + ry * vy) / len; // lateral deviation
-        return {
-          x: Math.max(0, Math.min(1, cal.tee.x + along * (cal.pin.x - cal.tee.x) + cross * pvx * plen * 0.5)),
-          y: Math.max(0, Math.min(1, cal.tee.y + along * (cal.pin.y - cal.tee.y) + cross * pvy * plen * 0.5)),
-        };
+        // Compute position in image-space, then remap to container-space
+        const imgX = cal.tee.x + along * (cal.pin.x - cal.tee.x) + cross * pvx * plen * 0.5;
+        const imgY = cal.tee.y + along * (cal.pin.y - cal.tee.y) + cross * pvy * plen * 0.5;
+        return imgToContainer(
+          Math.max(0, Math.min(1, imgX)),
+          Math.max(0, Math.min(1, imgY))
+        );
       }
 
       const teeNorm = toImageNorm(tXo, tYo);
@@ -211,8 +231,8 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
           // Set pin/tee from calibration data
           const cal = mastersCalibration.holes[String(hole.holeNumber)];
           if (cal) {
-            hole.pin = { x: cal.pin.x, y: cal.pin.y };
-            hole.tee = { x: cal.tee.x, y: cal.tee.y };
+            hole.pin = imgToContainer(cal.pin.x, cal.pin.y);
+            hole.tee = imgToContainer(cal.tee.x, cal.tee.y);
           }
         }
         delete hole._overlay;
