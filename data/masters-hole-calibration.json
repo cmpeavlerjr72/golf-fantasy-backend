@@ -1,0 +1,24 @@
+{
+  "_comment": "Tee and pin pixel positions on masters.com hole-map images (normalized 0-1). Calibrated by visual inspection of /assets/images/course/angc/hole-map-{N}.jpg. Used for 2-point affine projection of xo/yo shot coordinates onto hole illustrations.",
+  "imageUrl": "https://www.masters.com/assets/images/course/angc/hole-map-{N}.jpg",
+  "holes": {
+    "1":  { "tee": { "x": 0.07, "y": 0.58 }, "pin": { "x": 0.89, "y": 0.39 } },
+    "2":  { "tee": { "x": 0.08, "y": 0.28 }, "pin": { "x": 0.88, "y": 0.62 } },
+    "3":  { "tee": { "x": 0.10, "y": 0.62 }, "pin": { "x": 0.88, "y": 0.36 } },
+    "4":  { "tee": { "x": 0.09, "y": 0.52 }, "pin": { "x": 0.78, "y": 0.42 } },
+    "5":  { "tee": { "x": 0.08, "y": 0.52 }, "pin": { "x": 0.87, "y": 0.30 } },
+    "6":  { "tee": { "x": 0.10, "y": 0.52 }, "pin": { "x": 0.82, "y": 0.50 } },
+    "7":  { "tee": { "x": 0.08, "y": 0.42 }, "pin": { "x": 0.82, "y": 0.42 } },
+    "8":  { "tee": { "x": 0.08, "y": 0.38 }, "pin": { "x": 0.88, "y": 0.55 } },
+    "9":  { "tee": { "x": 0.07, "y": 0.35 }, "pin": { "x": 0.90, "y": 0.40 } },
+    "10": { "tee": { "x": 0.07, "y": 0.32 }, "pin": { "x": 0.88, "y": 0.55 } },
+    "11": { "tee": { "x": 0.08, "y": 0.38 }, "pin": { "x": 0.82, "y": 0.55 } },
+    "12": { "tee": { "x": 0.12, "y": 0.55 }, "pin": { "x": 0.68, "y": 0.42 } },
+    "13": { "tee": { "x": 0.06, "y": 0.22 }, "pin": { "x": 0.90, "y": 0.40 } },
+    "14": { "tee": { "x": 0.06, "y": 0.52 }, "pin": { "x": 0.90, "y": 0.30 } },
+    "15": { "tee": { "x": 0.06, "y": 0.38 }, "pin": { "x": 0.90, "y": 0.45 } },
+    "16": { "tee": { "x": 0.15, "y": 0.40 }, "pin": { "x": 0.78, "y": 0.50 } },
+    "17": { "tee": { "x": 0.10, "y": 0.45 }, "pin": { "x": 0.82, "y": 0.40 } },
+    "18": { "tee": { "x": 0.08, "y": 0.58 }, "pin": { "x": 0.82, "y": 0.32 } }
+  }
+}

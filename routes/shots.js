@@ -96,91 +96,51 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
     // Detect if this is a Masters tournament (uses masters.com coordinate system)
     const isMasters = pgaTournId === 'R2026014';
 
-    // Masters: generate an SVG data URI as the overlay image with shots
-    // pre-rendered. No external imagery — we own every pixel, so the
-    // coordinate math is guaranteed correct. The frontend still gets
-    // normalized from/to coords for its interactive highlight layer.
-    const MASTERS_SVG_W = 800, MASTERS_SVG_H = 500;
-
-    function mastersComputeBbox(overlay, strokes) {
-      const tXo = overlay.tee_enhanced_x, tYo = overlay.tee_enhanced_y;
-      const pXo = overlay.pin_enhanced_x, pYo = overlay.pin_enhanced_y;
-      if (tXo == null || pXo == null) return null;
-      if (tXo === 0 && tYo === 0) return null;
-      if (pXo === 0 && pYo === 0) return null;
-
-      const xs = [tXo, pXo], ys = [tYo, pYo];
-      for (const s of strokes) {
-        if (s._rawX != null) { xs.push(s._rawX); ys.push(s._rawY); }
-      }
-      const xMin = Math.min(...xs), xMax = Math.max(...xs);
-      const yMin = Math.min(...ys), yMax = Math.max(...ys);
-      const span = Math.max(xMax - xMin, yMax - yMin) || 200;
-      const pad = span * 0.18;
-      return { xoMin: xMin - pad, xoMax: xMax + pad, yoMin: yMin - pad, yoMax: yMax + pad };
-    }
-
-    function mastersToNorm(xo, yo, bbox) {
-      if (xo == null || yo == null || !bbox) return null;
-      return {
-        x: Math.max(0, Math.min(1, (xo - bbox.xoMin) / (bbox.xoMax - bbox.xoMin))),
-        y: Math.max(0, Math.min(1, (bbox.yoMax - yo) / (bbox.yoMax - bbox.yoMin))),
-      };
-    }
+    // Masters: use masters.com hole map illustrations as overlay backgrounds.
+    // Shot coordinates (xo/yo State Plane) are mapped onto the images using
+    // a 2-point affine calibration (tee + pin anchors). The calibration data
+    // was determined by visual inspection of each hole-map image.
+    const mastersCalibration = require('../data/masters-hole-calibration.json');
 
     function mastersCoordTransform(holeNum, overlay, rawStrokes) {
-      const bbox = mastersComputeBbox(overlay, rawStrokes);
-      if (!bbox) return rawStrokes;
-      const teeN = mastersToNorm(overlay.tee_enhanced_x, overlay.tee_enhanced_y, bbox);
+      const cal = mastersCalibration.holes[String(holeNum)];
+      if (!cal) return rawStrokes;
+
+      const tXo = overlay.tee_enhanced_x, tYo = overlay.tee_enhanced_y;
+      const pXo = overlay.pin_enhanced_x, pYo = overlay.pin_enhanced_y;
+      if (tXo == null || pXo == null) return rawStrokes;
+      if (tXo === 0 && tYo === 0) return rawStrokes;
+      if (pXo === 0 && pYo === 0) return rawStrokes;
+
+      // State Plane tee→pin vector
+      const dx = pXo - tXo, dy = pYo - tYo;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len === 0) return rawStrokes;
+      const ux = dx / len, uy = dy / len; // along-hole unit vector
+      const vx = -uy, vy = ux; // perpendicular unit vector
+
+      // Image tee→pin vector
+      const pdx = cal.pin.x - cal.tee.x, pdy = cal.pin.y - cal.tee.y;
+      const plen = Math.sqrt(pdx * pdx + pdy * pdy);
+      const pvx = -pdy / plen, pvy = pdx / plen; // perpendicular in image space
+
+      function toImageNorm(xo, yo) {
+        if (xo == null || yo == null) return null;
+        const rx = xo - tXo, ry = yo - tYo;
+        const along = (rx * ux + ry * uy) / len; // 0=tee, 1=pin
+        const cross = (rx * vx + ry * vy) / len; // lateral deviation
+        return {
+          x: Math.max(0, Math.min(1, cal.tee.x + along * (cal.pin.x - cal.tee.x) + cross * pvx * plen * 0.5)),
+          y: Math.max(0, Math.min(1, cal.tee.y + along * (cal.pin.y - cal.tee.y) + cross * pvy * plen * 0.5)),
+        };
+      }
+
+      const teeNorm = toImageNorm(tXo, tYo);
       return rawStrokes.map((s, i) => {
-        const to = mastersToNorm(s._rawX, s._rawY, bbox);
-        const from = i === 0 ? teeN : mastersToNorm(rawStrokes[i - 1]._rawX, rawStrokes[i - 1]._rawY, bbox);
+        const to = toImageNorm(s._rawX, s._rawY);
+        const from = i === 0 ? teeNorm : toImageNorm(rawStrokes[i - 1]._rawX, rawStrokes[i - 1]._rawY);
         return { ...s, from, to, greenFrom: null, greenTo: null };
       });
-    }
-
-    function mastersBuildOverlaySvg(hole, overlay, strokes) {
-      const bbox = mastersComputeBbox(overlay, strokes);
-      if (!bbox) return null;
-      const W = MASTERS_SVG_W, H = MASTERS_SVG_H;
-      const n = (xo, yo) => mastersToNorm(xo, yo, bbox);
-
-      const teeN = n(overlay.tee_enhanced_x, overlay.tee_enhanced_y);
-      const pinN = n(overlay.pin_enhanced_x, overlay.pin_enhanced_y);
-      const tPx = teeN ? teeN.x * W : 0, tPy = teeN ? teeN.y * H : 0;
-      const pPx = pinN ? pinN.x * W : W, pPy = pinN ? pinN.y * H : H;
-      const cx = (tPx + pPx) / 2, cy = (tPy + pPy) / 2;
-      const dist = Math.sqrt((pPx - tPx) ** 2 + (pPy - tPy) ** 2);
-      const ang = Math.atan2(pPy - tPy, pPx - tPx) * 180 / Math.PI;
-
-      let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
-      svg += `<rect width="${W}" height="${H}" fill="#1a3a1a"/>`;
-      svg += `<ellipse cx="${cx}" cy="${cy}" rx="${dist * 0.55}" ry="${dist * 0.22}" fill="#2d5a2d" transform="rotate(${ang},${cx},${cy})"/>`;
-      svg += `<ellipse cx="${cx}" cy="${cy}" rx="${dist * 0.48}" ry="${dist * 0.12}" fill="#3a7a3a" transform="rotate(${ang},${cx},${cy})"/>`;
-      if (pinN) svg += `<circle cx="${pPx}" cy="${pPy}" r="${Math.max(18, dist * 0.06)}" fill="#4a9a4a"/>`;
-      if (teeN) svg += `<rect x="${tPx - 8}" y="${tPy - 5}" width="16" height="10" fill="#5a8a5a" rx="2" transform="rotate(${ang},${tPx},${tPy})"/>`;
-
-      // Shot trail
-      const pts = [];
-      if (teeN) pts.push({ x: tPx, y: tPy });
-      for (const s of hole.strokes) {
-        if (s.to) pts.push({ x: s.to.x * W, y: s.to.y * H });
-      }
-      if (pts.length > 1) {
-        svg += `<polyline points="${pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="2" stroke-dasharray="6,4"/>`;
-      }
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i];
-        const isFirst = i === 0;
-        const isLast = i === pts.length - 1 && hole.strokes[hole.strokes.length - 1]?.finalStroke;
-        const clr = isFirst ? '#FFD700' : isLast ? '#FF4444' : '#FFFFFF';
-        svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${isFirst || isLast ? 6 : 4}" fill="${clr}" stroke="#000" stroke-width="1"/>`;
-        if (isFirst) svg += `<text x="${p.x.toFixed(1)}" y="${(p.y - 10).toFixed(1)}" fill="#FFD700" font-size="11" font-family="sans-serif" font-weight="bold" text-anchor="middle">TEE</text>`;
-      }
-      if (pinN) svg += `<text x="${pPx}" y="${pPy - 22}" fill="#FF4444" font-size="11" font-family="sans-serif" font-weight="bold" text-anchor="middle">PIN</text>`;
-      svg += `<text x="10" y="20" fill="rgba(255,255,255,0.6)" font-size="12" font-family="sans-serif">Hole ${hole.holeNumber} · Par ${hole.par} · ${hole.yardage} yds</text>`;
-      svg += '</svg>';
-      return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
     }
 
     // Group shots by hole
@@ -192,11 +152,11 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
           && !(overlay.tee_enhanced_x === 0 && overlay.tee_enhanced_y === 0)
           && !(overlay.pin_enhanced_x === 0 && overlay.pin_enhanced_y === 0);
 
-        // For the Masters, overlayUrl is set to a placeholder — the actual
-        // SVG data URI is generated after shots are grouped and transformed
         let overlayUrl;
-        if (isMasters) {
-          overlayUrl = hasValidCoords ? 'MASTERS_SVG_PENDING' : null;
+        if (isMasters && hasValidCoords && mastersCalibration.holes[String(s.hole_number)]) {
+          overlayUrl = `https://www.masters.com/assets/images/course/angc/hole-map-${s.hole_number}.jpg`;
+        } else if (isMasters) {
+          overlayUrl = null;
         } else {
           overlayUrl = overlay.overlay_full_url || null;
         }
@@ -248,14 +208,11 @@ router.get('/:playerName/round/:round', auth, async (req, res) => {
       for (const hole of Object.values(holesMap)) {
         if (hole._overlay && hole.strokes.length > 0) {
           hole.strokes = mastersCoordTransform(hole.holeNumber, hole._overlay, hole.strokes);
-          // Generate SVG overlay with shots baked in
-          const bbox = mastersComputeBbox(hole._overlay, hole.strokes);
-          if (bbox) {
-            hole.overlayFullUrl = mastersBuildOverlaySvg(hole, hole._overlay, hole.strokes);
-            hole.pin = mastersToNorm(hole._overlay.pin_enhanced_x, hole._overlay.pin_enhanced_y, bbox);
-            hole.tee = mastersToNorm(hole._overlay.tee_enhanced_x, hole._overlay.tee_enhanced_y, bbox);
-          } else {
-            hole.overlayFullUrl = null;
+          // Set pin/tee from calibration data
+          const cal = mastersCalibration.holes[String(hole.holeNumber)];
+          if (cal) {
+            hole.pin = { x: cal.pin.x, y: cal.pin.y };
+            hole.tee = { x: cal.tee.x, y: cal.tee.y };
           }
         }
         delete hole._overlay;
