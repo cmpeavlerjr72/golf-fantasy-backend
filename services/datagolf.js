@@ -221,19 +221,55 @@ async function syncLiveScores(tournamentId) {
     return 0;
   }
 
-  const rows = (live.data || []).map((p, i) => ({
-    tournament_id: tournamentId,
-    player_name: p.player_name,
-    position: p.current_pos || null,
-    score_to_par: p.current_score ?? null,
-    thru: p.thru != null ? String(p.thru === 0 && p.end_hole === 18 ? 'F' : p.thru) : null,
-    today: p.today ?? null,
-    round1: p.R1 ?? null,
-    round2: p.R2 ?? null,
-    round3: p.R3 ?? null,
-    round4: p.R4 ?? null,
-    updated_at: new Date().toISOString(),
-  }));
+  // Build tee-time lookup so we can show the tee time for players who haven't started
+  const { data: teeTimes } = await supabase
+    .from('tee_times')
+    .select('player_name, round_num, tee_time')
+    .eq('tournament_id', tournamentId);
+
+  const teeTimeMap = {};
+  for (const tt of teeTimes || []) {
+    teeTimeMap[`${tt.player_name}_R${tt.round_num}`] = tt.tee_time;
+  }
+
+  const rows = (live.data || []).map((p) => {
+    let thru = null;
+    if (p.thru != null) {
+      if (p.thru === 0 && p.end_hole === 18 && p.current_pos !== '--') {
+        thru = 'F';
+      } else if (p.thru === 0) {
+        // Player hasn't started — show their tee time for this round
+        const round = p.round || 1;
+        const teeISO = teeTimeMap[`${p.player_name}_R${round}`];
+        if (teeISO) {
+          const d = new Date(teeISO);
+          const h = d.getHours();
+          const m = String(d.getMinutes()).padStart(2, '0');
+          const ampm = h >= 12 ? 'PM' : 'AM';
+          const h12 = h % 12 || 12;
+          thru = `${h12}:${m} ${ampm}`;
+        } else {
+          thru = '0';
+        }
+      } else {
+        thru = String(p.thru);
+      }
+    }
+
+    return {
+      tournament_id: tournamentId,
+      player_name: p.player_name,
+      position: p.current_pos || null,
+      score_to_par: p.current_score ?? null,
+      thru,
+      today: p.today ?? null,
+      round1: p.R1 ?? null,
+      round2: p.R2 ?? null,
+      round3: p.R3 ?? null,
+      round4: p.R4 ?? null,
+      updated_at: new Date().toISOString(),
+    };
+  });
 
   // Atomic upsert — no gap where scores disappear
   for (let i = 0; i < rows.length; i += 500) {
