@@ -164,9 +164,50 @@ function formatTeeTime(isoString) {
 // Call this on the standings response before sending to client.
 // Modifies player objects in-place.
 async function enrichStandings(standingsData) {
-  // TEMPORARILY STRIPPED — debugging shot tracker "no data" issue on pool leagues.
-  // All enrichment (flags, tee times, movement arrows) disabled to isolate whether
-  // name decoration is causing the lookup failure.
+  if (!standingsData || !standingsData.standings) return standingsData;
+
+  const tournamentId = standingsData.tournament?.id;
+  const teeMap = await getTeeTimes(tournamentId);
+
+  const allPlayers = [];
+
+  for (const team of standingsData.standings) {
+    for (const player of team.players || []) {
+      const rawName = player.playerName;
+      allPlayers.push({ rawName, player });
+
+      // 1. Tee time in thru field when player hasn't started
+      const notStarted = !player.thru || player.thru === '-' || player.thru === '0';
+      if (notStarted) {
+        const tee = teeMap.get(rawName) || teeMap.get(normalizeName(rawName));
+        if (tee) {
+          const formatted = formatTeeTime(tee);
+          if (formatted) {
+            player.thru = formatted;
+            if (!player.position || player.position === '-') {
+              player.position = '--';
+            }
+          }
+        }
+      }
+
+      // 2. Position movement arrows
+      const arrow = getMovementArrow(rawName, player.position);
+      if (arrow && player.position && player.position !== '-' && player.position !== '--') {
+        player.position = arrow + player.position;
+      }
+
+      // 3. Country flag — stored separately so playerName stays clean for lookups
+      const flag = getCountryFlag(rawName);
+      player.countryFlag = flag || '';
+    }
+  }
+
+  updatePositionCache(allPlayers.map(({ rawName, player }) => ({
+    playerName: rawName,
+    position: player.position,
+  })));
+
   return standingsData;
 }
 
@@ -203,12 +244,9 @@ async function enrichLeaderboard(leaderboardData) {
       player.position = arrow + player.position;
     }
 
-    // 3. Country flag (last)
-    player.rawPlayerName = rawName;
+    // 3. Country flag — stored separately so playerName stays clean for lookups
     const flag = getCountryFlag(rawName);
-    if (flag) {
-      player.playerName = flag + ' ' + player.playerName;
-    }
+    player.countryFlag = flag || '';
 
     cacheEntries.push({ playerName: rawName, position: player.position });
   }
